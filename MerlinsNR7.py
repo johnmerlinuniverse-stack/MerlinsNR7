@@ -297,8 +297,8 @@ def is_nrn(rows, n):
 # App
 # -----------------------------
 def main():
-    st.set_page_config(page_title="NR4/NR7 Scanner", layout="wide")
-    st.title("NR4 / NR7 Scanner")
+    st.set_page_config(page_title="Merlin's NR4/NR7 Scanner", layout="wide")
+    st.title("Merlin's NR4 / NR7 Scanner")
 
     universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top N"], index=0)
 
