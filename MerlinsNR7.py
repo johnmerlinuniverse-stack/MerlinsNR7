@@ -387,7 +387,7 @@ def simulate_breakouts_since_last_nr(closed):
 # -----------------------------
 def main():
     st.set_page_config(page_title="NR4/NR7 Scanner", layout="wide")
-    st.title("NR4 / NR7 Scanner")
+    st.title("Merlin's NR4 / NR7 Scanner")
 
     universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top N"], index=0)
 
