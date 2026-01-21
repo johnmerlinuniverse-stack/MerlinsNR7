@@ -249,13 +249,11 @@ def load_cw_id_map():
 # -----------------------------
 @st.cache_data(ttl=3600)
 def binance_futures_symbols_set():
-    """
-    Holt TRADING Symbole aus Binance USDT-M Futures exchangeInfo.
-    Filtert auf PERPETUAL.
-    """
+    last_err = None
+    headers = {"User-Agent": "Mozilla/5.0"}
     for url in BINANCE_FUTURES_EXCHANGEINFO_ENDPOINTS:
         try:
-            r = requests.get(url, timeout=25)
+            r = requests.get(url, timeout=25, headers=headers)
             r.raise_for_status()
             info = r.json()
             syms = set()
@@ -265,10 +263,14 @@ def binance_futures_symbols_set():
                 if s.get("contractType") and s.get("contractType") != "PERPETUAL":
                     continue
                 syms.add(s.get("symbol"))
+            if not syms:
+                raise RuntimeError(f"exchangeInfo OK, aber 0 Symbole erhalten: {url}")
             return syms
-        except Exception:
+        except Exception as e:
+            last_err = e
             continue
-    return set()
+    raise RuntimeError(f"Binance Futures exchangeInfo nicht erreichbar: {last_err}")
+
 
 def binance_futures_klines(symbol, interval, limit=200):
     last_err = None
