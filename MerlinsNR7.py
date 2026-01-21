@@ -17,7 +17,6 @@ BINANCE_KLINES_ENDPOINTS = [
     "https://data-api.binance.vision/api/v3/klines",
 ]
 
-# Quote-Priority: reduziert massiv "skipped" bei Exchange Close
 QUOTE_PRIORITY = ["USDT", "USDC", "FDUSD", "BUSD", "TUSD", "BTC", "ETH"]
 
 CW_DEFAULT_TICKERS = """
@@ -207,7 +206,6 @@ def is_stablecoin_marketrow(row: dict) -> bool:
 def cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30):
     raw = cg_get(f"/coins/{coin_id}/ohlc", {"vs_currency": vs, "days": days_fetch}, max_retries=10, min_interval_sec=1.2)
 
-    # Aggregation auf UTC-Tage (OHLC liefert teils mehrere Punkte pro Tag)
     day = {}
     for ts, o, h, l, c in raw:
         dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
@@ -221,14 +219,13 @@ def cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30):
                 day[key]["close"] = c
                 day[key]["last_ts"] = ts
 
-    # “Heute” (laufend) rauswerfen => letzte abgeschlossene Tageskerze
     today_utc = datetime.now(timezone.utc).date().isoformat()
     keys = sorted(k for k in day.keys() if k != today_utc)
 
     rows = []
     for k in keys:
         rows.append({
-            "time": k,  # ISO date
+            "time": k,
             "high": float(day[k]["high"]),
             "low": float(day[k]["low"]),
             "close": float(day[k]["close"]),
@@ -268,12 +265,13 @@ def binance_klines(symbol, interval, limit=200):
             for k in data:
                 close_time = int(k[6])
                 dt = datetime.fromtimestamp(close_time / 1000, tz=timezone.utc).isoformat()
+                high = float(k[2]); low = float(k[3]); close = float(k[4])
                 rows.append({
                     "time": dt,
-                    "high": float(k[2]),
-                    "low": float(k[3]),
-                    "close": float(k[4]),
-                    "range": float(k[2]) - float(k[3]),
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "range": high - low,
                     "close_time": close_time,
                 })
             return rows
@@ -294,52 +292,62 @@ def find_best_binance_pair(sym: str, symset: set):
 # -----------------------------
 def compute_nr_flags(closed):
     """
-    Closed = list of dicts with keys: high, low, close, range, time
-    Returns: (nr4_flags, nr7_flags)
-    LuxAlgo: nr7_pattern = rng == lowest(rng,7)
-             nr4_pattern = rng == lowest(rng,4) AND not nr7_pattern
+    Adds NR10 analog + priorities:
+      NR10 highest
+      NR7 only if not NR10
+      NR4 only if not NR7 and not NR10
+    Returns: (nr4_flags, nr7_flags, nr10_flags)
     """
     n = len(closed)
     rngs = [c["range"] for c in closed]
+    nr10 = [False] * n
     nr7 = [False] * n
     nr4 = [False] * n
 
     for i in range(n):
-        w7 = rngs[max(0, i - 6): i + 1]
-        w4 = rngs[max(0, i - 3): i + 1]
-        lst7 = min(w7) if w7 else None
-        lst4 = min(w4) if w4 else None
-        is7 = (lst7 is not None and rngs[i] == lst7 and len(w7) >= 7)
-        is4 = (lst4 is not None and rngs[i] == lst4 and len(w4) >= 4 and not is7)
+        w10 = rngs[max(0, i - 9): i + 1]
+        w7  = rngs[max(0, i - 6): i + 1]
+        w4  = rngs[max(0, i - 3): i + 1]
+
+        lst10 = min(w10) if len(w10) >= 10 else None
+        lst7  = min(w7)  if len(w7)  >= 7  else None
+        lst4  = min(w4)  if len(w4)  >= 4  else None
+
+        is10 = (lst10 is not None and rngs[i] == lst10)
+        is7  = (lst7 is not None and rngs[i] == lst7 and (not is10))
+        is4  = (lst4 is not None and rngs[i] == lst4 and (not is7) and (not is10))
+
+        nr10[i] = is10
         nr7[i] = is7
         nr4[i] = is4
 
-    return nr4, nr7
+    return nr4, nr7, nr10
 
 def simulate_breakouts_since_last_nr(closed):
     """
-    Simuliert die LuxAlgo Breakout-Signale seit dem letzten NR-Setup:
-    - rh/rl/mid aus der NR-Kerze
-    - Gating via mid (up_check/down_check)
     Returns:
-      setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count
+      setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, mid
     """
     if len(closed) < 12:
-        return "", "", "-", "-", 0, 0
+        return "", "", "-", "-", 0, 0, None, None, None
 
-    nr4_flags, nr7_flags = compute_nr_flags(closed)
+    nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(closed)
 
-    # Letztes NR-Setup finden (NR7 oder NR4)
     setup_idx = -1
     setup_type = ""
     for i in range(len(closed) - 1, -1, -1):
-        if nr7_flags[i] or nr4_flags[i]:
+        if nr10_flags[i] or nr7_flags[i] or nr4_flags[i]:
             setup_idx = i
-            setup_type = "NR7" if nr7_flags[i] else "NR4"
+            if nr10_flags[i]:
+                setup_type = "NR10"
+            elif nr7_flags[i]:
+                setup_type = "NR7"
+            else:
+                setup_type = "NR4"
             break
 
     if setup_idx == -1:
-        return "", "", "-", "-", 0, 0
+        return "", "", "-", "-", 0, 0, None, None, None
 
     rh = closed[setup_idx]["high"]
     rl = closed[setup_idx]["low"]
@@ -352,27 +360,20 @@ def simulate_breakouts_since_last_nr(closed):
     breakout_state = "-"
     breakout_tag = "-"
 
-    # Wie im Pine: Reset-Bedingungen zuerst, dann Cross-Signale (pro Bar)
     for j in range(setup_idx + 1, len(closed)):
         prev_close = closed[j - 1]["close"]
         cur_close = closed[j]["close"]
 
-        # Down reset: if (close > mid and down_check == false) -> down_check := true
         if cur_close > mid and down_check is False:
             down_check = True
-
-        # Down signal: crossunder(close, rl) and down_check
         if (prev_close >= rl) and (cur_close < rl) and down_check:
             down_count += 1
             down_check = False
             breakout_state = "DOWN"
             breakout_tag = f"DOWN#{down_count}"
 
-        # Up reset: if (close < mid and up_check == false) -> up_check := true
         if cur_close < mid and up_check is False:
             up_check = True
-
-        # Up signal: crossover(close, rh) and up_check
         if (prev_close <= rh) and (cur_close > rh) and up_check:
             up_count += 1
             up_check = False
@@ -380,14 +381,14 @@ def simulate_breakouts_since_last_nr(closed):
             breakout_tag = f"UP#{up_count}"
 
     setup_time = closed[setup_idx]["time"]
-    return setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count
+    return setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, mid
 
 # -----------------------------
 # App
 # -----------------------------
 def main():
-    st.set_page_config(page_title="NR4/NR7 Scanner", layout="wide")
-    st.title("Merlin's NR4 / NR7 Scanner")
+    st.set_page_config(page_title="NR4/NR7/NR10 Scanner", layout="wide")
+    st.title("NR4 / NR7 / NR10 Scanner")
 
     universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top N"], index=0)
 
@@ -418,9 +419,13 @@ def main():
 - ❌ Nachteil: Langsamer (mehr API-Requests), kann minimal von Exchange-Kerzen abweichen.
         """)
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     want_nr7 = c1.checkbox("NR7", value=True)
     want_nr4 = c2.checkbox("NR4", value=False)
+    want_nr10 = c3.checkbox("NR10", value=False)
+
+    # NEW: In-Range Anzeige + Filter
+    show_inrange_only = st.checkbox("Nur Coins anzeigen, die aktuell im NR-Range sind", value=False)
 
     tickers_text = None
     if universe == "CryptoWaves (Default)":
@@ -430,14 +435,14 @@ def main():
 
     if not run:
         return
-    if not (want_nr7 or want_nr4):
-        st.warning("Bitte NR7 und/oder NR4 auswählen.")
+    if not (want_nr7 or want_nr4 or want_nr10):
+        st.warning("Bitte mindestens NR7/NR4/NR10 auswählen.")
         return
 
     interval = {"1D": "1d", "4H": "4h", "1W": "1w"}[tf]
     use_utc = (tf == "1D" and str(close_mode).startswith("UTC"))
 
-    scan_list = []  # {"symbol","name","coingecko_id"}
+    scan_list = []
     cw_map = load_cw_id_map()
 
     if universe == "CoinGecko Top N":
@@ -489,10 +494,8 @@ def main():
                 closed = None
                 source = None
 
-                # Exchange Close: try Binance pairs; if not found and 1D -> UTC fallback
                 if not use_utc:
                     pair = find_best_binance_pair(sym, symset)
-
                     if pair:
                         kl = binance_klines(pair, interval=interval, limit=200)
                         if len(kl) >= 15:
@@ -500,7 +503,7 @@ def main():
                             closed = [{"time": k["time"], "high": k["high"], "low": k["low"], "close": k["close"], "range": k["range"]} for k in kl]
                             source = f"Binance {interval} ({pair})"
 
-                    # Fallback for 1D if no binance data
+                    # Fallback nur für 1D
                     if (closed is None) and (tf == "1D"):
                         if coin_id:
                             rows = cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30)
@@ -521,7 +524,6 @@ def main():
                         progress.progress(i / len(scan_list))
                         continue
 
-                # UTC Mode
                 else:
                     if not coin_id:
                         skipped.append(f"{sym} (no coingecko_id)")
@@ -542,24 +544,47 @@ def main():
                     progress.progress(i / len(scan_list))
                     continue
 
-                # NR flags for LAST closed candle (LuxAlgo-style)
-                nr4_flags, nr7_flags = compute_nr_flags(closed)
+                # NR flags (last closed candle)
+                nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(closed)
+                last_nr10 = bool(nr10_flags[-1])
                 last_nr7 = bool(nr7_flags[-1])
                 last_nr4 = bool(nr4_flags[-1])
 
+                nr10 = want_nr10 and last_nr10
                 nr7 = want_nr7 and last_nr7
                 nr4 = want_nr4 and last_nr4
 
-                # Breakouts since last NR setup (LuxAlgo gating)
-                setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count = simulate_breakouts_since_last_nr(closed)
+                # Breakouts + last setup range
+                setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, mid = simulate_breakouts_since_last_nr(closed)
 
-                # Nur listen, wenn NR4/NR7 aktiv auf der letzten abgeschlossenen Kerze
-                if nr7 or nr4:
+                last_close = float(closed[-1]["close"])
+                in_nr_range = False
+                if rh is not None and rl is not None:
+                    lo = min(rl, rh)
+                    hi = max(rl, rh)
+                    in_nr_range = (lo <= last_close <= hi)
+
+                # Optional: Filter "nur im Range"
+                if show_inrange_only and (not in_nr_range):
+                    progress.progress(i / len(scan_list))
+                    continue
+
+                # Wir listen standardmäßig nur, wenn letzte Kerze NR10/NR7/NR4 ist
+                # ABER: Wenn "nur im Range" aktiv ist, zeigen wir auch Coins im Range,
+                # selbst wenn die letzte Kerze nicht NR war (Range vom letzten NR-Setup).
+                show_row = (nr10 or nr7 or nr4) or (show_inrange_only and in_nr_range)
+
+                if show_row:
                     results.append({
                         "symbol": sym,
                         "name": name,
+                        "NR10": nr10,
                         "NR7": nr7,
                         "NR4": nr4,
+                        "in_nr_range_now": in_nr_range,
+                        "last_close": last_close,
+                        "range_low": rl,
+                        "range_high": rh,
                         "breakout_state": breakout_state,
                         "breakout_tag": breakout_tag,
                         "up_breakouts": up_count,
@@ -573,7 +598,7 @@ def main():
             except Exception as e:
                 key = os.getenv("COINGECKO_DEMO_API_KEY", "")
                 msg = str(e).replace(key, "***")
-                errors.append(f"{sym}: {type(e).__name__} - {msg[:160]}")
+                errors.append(f"{sym}: {type(e).__name__} - {msg[:180]}")
 
             progress.progress(i / len(scan_list))
 
@@ -582,12 +607,18 @@ def main():
         st.warning(f"Keine Treffer. Skipped: {len(skipped)} | Errors: {len(errors)}")
     else:
         df = df[[
-            "symbol","name","NR7","NR4",
+            "symbol","name",
+            "NR10","NR7","NR4",
+            "in_nr_range_now","last_close","range_low","range_high",
             "breakout_state","breakout_tag","up_breakouts","down_breakouts",
             "nr_setup_type","nr_setup_time",
             "coingecko_id","source"
         ]]
-        df = df.sort_values(["NR7", "NR4", "symbol"], ascending=[False, False, True]).reset_index(drop=True)
+
+        df = df.sort_values(
+            ["in_nr_range_now","NR10","NR7","NR4","symbol"],
+            ascending=[False, False, False, False, True]
+        ).reset_index(drop=True)
 
         st.write(f"Treffer: {len(df)} | Skipped: {len(skipped)} | Errors: {len(errors)}")
         st.dataframe(df, use_container_width=True)
