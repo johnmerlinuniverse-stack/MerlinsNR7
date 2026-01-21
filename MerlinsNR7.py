@@ -20,7 +20,6 @@ BINANCE_FUTURES_KLINES_ENDPOINTS = [
     "https://fapi.binance.vision/fapi/v1/klines",
 ]
 
-# Default Quote-Priority (wenn "Nur USDT-Perps" aus ist)
 QUOTE_PRIORITY_DEFAULT = ["USDT", "USDC", "FDUSD", "BUSD", "TUSD", "BTC", "ETH"]
 
 CW_DEFAULT_TICKERS = """
@@ -246,6 +245,8 @@ def load_cw_id_map():
 
 # -----------------------------
 # Binance FUTURES (USDT-M) robust
+#   ✅ Saubere Lösung: KEIN leeres Set cachen
+#   -> wenn alle Endpoints failen, Exception werfen
 # -----------------------------
 @st.cache_data(ttl=3600)
 def binance_futures_symbols_set():
@@ -262,7 +263,9 @@ def binance_futures_symbols_set():
                     continue
                 if s.get("contractType") and s.get("contractType") != "PERPETUAL":
                     continue
-                syms.add(s.get("symbol"))
+                sym = s.get("symbol")
+                if sym:
+                    syms.add(sym)
             if not syms:
                 raise RuntimeError(f"exchangeInfo OK, aber 0 Symbole erhalten: {url}")
             return syms
@@ -271,12 +274,12 @@ def binance_futures_symbols_set():
             continue
     raise RuntimeError(f"Binance Futures exchangeInfo nicht erreichbar: {last_err}")
 
-
 def binance_futures_klines(symbol, interval, limit=200):
     last_err = None
+    headers = {"User-Agent": "Mozilla/5.0"}
     for url in BINANCE_FUTURES_KLINES_ENDPOINTS:
         try:
-            r = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=25)
+            r = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=25, headers=headers)
             r.raise_for_status()
             data = r.json()
             rows = []
@@ -299,14 +302,9 @@ def binance_futures_klines(symbol, interval, limit=200):
     raise last_err if last_err else RuntimeError("Binance Futures klines Fehler")
 
 def find_best_futures_pair(sym: str, symset: set, only_usdt_perps: bool):
-    """
-    Wenn only_usdt_perps=True -> nur SYMBOLUSDT
-    sonst -> QUOTE_PRIORITY_DEFAULT Reihenfolge
-    """
     if only_usdt_perps:
         pair = f"{sym}USDT"
         return pair if pair in symset else None
-
     for q in QUOTE_PRIORITY_DEFAULT:
         pair = f"{sym}{q}"
         if pair in symset:
@@ -317,12 +315,6 @@ def find_best_futures_pair(sym: str, symset: set, only_usdt_perps: bool):
 # NR + Breakout logic (LuxAlgo-style) + NR10
 # -----------------------------
 def compute_nr_flags(closed):
-    """
-    NR10 highest priority
-    NR7 only if not NR10
-    NR4 only if not NR7 and not NR10
-    Returns: (nr4_flags, nr7_flags, nr10_flags)
-    """
     n = len(closed)
     rngs = [c["range"] for c in closed]
     nr10 = [False] * n
@@ -349,11 +341,6 @@ def compute_nr_flags(closed):
     return nr4, nr7, nr10
 
 def simulate_breakouts_since_last_nr(closed):
-    """
-    LuxAlgo gating via mid.
-    Returns:
-      setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl
-    """
     if len(closed) < 12:
         return "", "", "-", "-", 0, 0, None, None
 
@@ -426,7 +413,6 @@ def main():
 
     tf = st.selectbox("Timeframe", ["1D", "4H", "1W"], index=0)
 
-    # NEW: Only USDT Perps toggle (futures)
     only_usdt_perps = st.checkbox("Nur USDT-Perps (Binance Futures)", value=True)
 
     if tf == "1D":
@@ -496,7 +482,11 @@ def main():
 
     symset = set()
     if not use_utc:
-        symset = binance_futures_symbols_set()
+        try:
+            symset = binance_futures_symbols_set()
+        except Exception:
+            symset = set()
+
         if not symset:
             if tf == "1D":
                 use_utc = True
@@ -526,11 +516,10 @@ def main():
                     if pair:
                         kl = binance_futures_klines(pair, interval=interval, limit=200)
                         if len(kl) >= 15:
-                            kl = kl[:-1]  # live candle weg
+                            kl = kl[:-1]
                             closed = [{"time": k["time"], "high": k["high"], "low": k["low"], "close": k["close"], "range": k["range"]} for k in kl]
                             source = f"Binance FUTURES {interval} ({pair})"
 
-                    # Fallback nur für 1D
                     if (closed is None) and (tf == "1D"):
                         if coin_id:
                             rows = cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30)
