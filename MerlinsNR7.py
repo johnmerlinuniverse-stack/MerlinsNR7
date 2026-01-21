@@ -8,16 +8,20 @@ from datetime import datetime, timezone
 
 CG_BASE = "https://api.coingecko.com/api/v3"
 
-BINANCE_EXCHANGEINFO_ENDPOINTS = [
-    "https://api.binance.com/api/v3/exchangeInfo",
-    "https://data-api.binance.vision/api/v3/exchangeInfo",
+# -----------------------------
+# Binance FUTURES (USDT-M) endpoints (statt Spot)
+# -----------------------------
+BINANCE_FUTURES_EXCHANGEINFO_ENDPOINTS = [
+    "https://fapi.binance.com/fapi/v1/exchangeInfo",
+    "https://fapi.binance.vision/fapi/v1/exchangeInfo",
 ]
-BINANCE_KLINES_ENDPOINTS = [
-    "https://api.binance.com/api/v3/klines",
-    "https://data-api.binance.vision/api/v3/klines",
+BINANCE_FUTURES_KLINES_ENDPOINTS = [
+    "https://fapi.binance.com/fapi/v1/klines",
+    "https://fapi.binance.vision/fapi/v1/klines",
 ]
 
-QUOTE_PRIORITY = ["USDT", "USDC", "FDUSD", "BUSD", "TUSD", "BTC", "ETH"]
+# Default Quote-Priority (wenn "Nur USDT-Perps" aus ist)
+QUOTE_PRIORITY_DEFAULT = ["USDT", "USDC", "FDUSD", "BUSD", "TUSD", "BTC", "ETH"]
 
 CW_DEFAULT_TICKERS = """
 BTC
@@ -241,22 +245,34 @@ def load_cw_id_map():
         return {}
 
 # -----------------------------
-# Binance robust
+# Binance FUTURES (USDT-M) robust
 # -----------------------------
-def binance_symbols_set():
-    for url in BINANCE_EXCHANGEINFO_ENDPOINTS:
+@st.cache_data(ttl=3600)
+def binance_futures_symbols_set():
+    """
+    Holt TRADING Symbole aus Binance USDT-M Futures exchangeInfo.
+    Filtert auf PERPETUAL.
+    """
+    for url in BINANCE_FUTURES_EXCHANGEINFO_ENDPOINTS:
         try:
             r = requests.get(url, timeout=25)
             r.raise_for_status()
             info = r.json()
-            return {s.get("symbol") for s in info.get("symbols", []) if s.get("status") == "TRADING"}
+            syms = set()
+            for s in info.get("symbols", []):
+                if s.get("status") != "TRADING":
+                    continue
+                if s.get("contractType") and s.get("contractType") != "PERPETUAL":
+                    continue
+                syms.add(s.get("symbol"))
+            return syms
         except Exception:
             continue
     return set()
 
-def binance_klines(symbol, interval, limit=200):
+def binance_futures_klines(symbol, interval, limit=200):
     last_err = None
-    for url in BINANCE_KLINES_ENDPOINTS:
+    for url in BINANCE_FUTURES_KLINES_ENDPOINTS:
         try:
             r = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=25)
             r.raise_for_status()
@@ -278,24 +294,31 @@ def binance_klines(symbol, interval, limit=200):
         except Exception as e:
             last_err = e
             continue
-    raise last_err if last_err else RuntimeError("Binance klines Fehler")
+    raise last_err if last_err else RuntimeError("Binance Futures klines Fehler")
 
-def find_best_binance_pair(sym: str, symset: set):
-    for q in QUOTE_PRIORITY:
+def find_best_futures_pair(sym: str, symset: set, only_usdt_perps: bool):
+    """
+    Wenn only_usdt_perps=True -> nur SYMBOLUSDT
+    sonst -> QUOTE_PRIORITY_DEFAULT Reihenfolge
+    """
+    if only_usdt_perps:
+        pair = f"{sym}USDT"
+        return pair if pair in symset else None
+
+    for q in QUOTE_PRIORITY_DEFAULT:
         pair = f"{sym}{q}"
         if pair in symset:
             return pair
     return None
 
 # -----------------------------
-# NR + Breakout logic (LuxAlgo-style)
+# NR + Breakout logic (LuxAlgo-style) + NR10
 # -----------------------------
 def compute_nr_flags(closed):
     """
-    Adds NR10 analog + priorities:
-      NR10 highest
-      NR7 only if not NR10
-      NR4 only if not NR7 and not NR10
+    NR10 highest priority
+    NR7 only if not NR10
+    NR4 only if not NR7 and not NR10
     Returns: (nr4_flags, nr7_flags, nr10_flags)
     """
     n = len(closed)
@@ -325,11 +348,12 @@ def compute_nr_flags(closed):
 
 def simulate_breakouts_since_last_nr(closed):
     """
+    LuxAlgo gating via mid.
     Returns:
-      setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, mid
+      setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl
     """
     if len(closed) < 12:
-        return "", "", "-", "-", 0, 0, None, None, None
+        return "", "", "-", "-", 0, 0, None, None
 
     nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(closed)
 
@@ -347,7 +371,7 @@ def simulate_breakouts_since_last_nr(closed):
             break
 
     if setup_idx == -1:
-        return "", "", "-", "-", 0, 0, None, None, None
+        return "", "", "-", "-", 0, 0, None, None
 
     rh = closed[setup_idx]["high"]
     rl = closed[setup_idx]["low"]
@@ -381,14 +405,14 @@ def simulate_breakouts_since_last_nr(closed):
             breakout_tag = f"UP#{up_count}"
 
     setup_time = closed[setup_idx]["time"]
-    return setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, mid
+    return setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl
 
 # -----------------------------
 # App
 # -----------------------------
 def main():
-    st.set_page_config(page_title="NR4/NR7/NR10 Scanner", layout="wide")
-    st.title("NR4 / NR7 / NR10 Scanner")
+    st.set_page_config(page_title="NR Scanner (Binance FUTURES)", layout="wide")
+    st.title("NR4 / NR7 / NR10 Scanner (Binance FUTURES)")
 
     universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top N"], index=0)
 
@@ -400,23 +424,25 @@ def main():
 
     tf = st.selectbox("Timeframe", ["1D", "4H", "1W"], index=0)
 
+    # NEW: Only USDT Perps toggle (futures)
+    only_usdt_perps = st.checkbox("Nur USDT-Perps (Binance Futures)", value=True)
+
     if tf == "1D":
-        close_mode = st.selectbox("Close", ["Exchange Close (empfohlen)", "UTC (langsam, days_fetch=30)"], index=0)
+        close_mode = st.selectbox("Close", ["Exchange Close (Futures)", "UTC (langsam, days_fetch=30)"], index=0)
     else:
-        close_mode = "Exchange Close (empfohlen)"
+        close_mode = "Exchange Close (Futures)"
 
     with st.expander("ℹ️ Unterschied: Exchange Close vs UTC"):
         st.markdown("""
-**Exchange Close (empfohlen)**  
-- Kerzen kommen direkt von einer Börse (z. B. Binance).  
-- Tages-Close = Close der Börsen-Tageskerze.  
-- ✅ Vorteil: Sehr praxisnah fürs Trading, meist schneller.  
-- ❌ Nachteil: Nicht jeder Coin hat ein passendes Pair (z.B. kein USDT/USDC/FDUSD Pair).
+**Exchange Close (Futures)**  
+- Kerzen kommen von **Binance USDT-M Futures (PERPETUAL)**.  
+- Tages-Close = Close der Futures-Tageskerze.  
+- ✅ Vorteil: Passt zu deinem Futures-Trading, meist schnell.
 
 **UTC (letzte abgeschlossene Tageskerze)**  
-- Ein Tag läuft immer von **00:00 bis 23:59 UTC** (einheitlich).  
-- ✅ Vorteil: Vergleichbar und konsistent.  
-- ❌ Nachteil: Langsamer (mehr API-Requests), kann minimal von Exchange-Kerzen abweichen.
+- Ein Tag läuft immer von **00:00 bis 23:59 UTC**.  
+- ✅ Vorteil: Einheitlich & vergleichbar.  
+- ❌ Nachteil: Langsamer (mehr API-Requests), kann minimal abweichen.
         """)
 
     c1, c2, c3 = st.columns(3)
@@ -424,7 +450,6 @@ def main():
     want_nr4 = c2.checkbox("NR4", value=False)
     want_nr10 = c3.checkbox("NR10", value=False)
 
-    # NEW: In-Range Anzeige + Filter
     show_inrange_only = st.checkbox("Nur Coins anzeigen, die aktuell im NR-Range sind", value=False)
 
     tickers_text = None
@@ -432,7 +457,6 @@ def main():
         tickers_text = st.text_area("Ticker (1 pro Zeile)", value=CW_DEFAULT_TICKERS, height=110)
 
     run = st.button("Scan")
-
     if not run:
         return
     if not (want_nr7 or want_nr4 or want_nr10):
@@ -470,13 +494,13 @@ def main():
 
     symset = set()
     if not use_utc:
-        symset = binance_symbols_set()
+        symset = binance_futures_symbols_set()
         if not symset:
             if tf == "1D":
                 use_utc = True
-                st.warning("Binance ist nicht erreichbar. Fallback auf UTC (CoinGecko) aktiviert. (Langsamer)")
+                st.warning("Binance Futures ist nicht erreichbar. Fallback auf UTC (CoinGecko) aktiviert. (Langsamer)")
             else:
-                st.error("Binance ist nicht erreichbar. Für 4H/1W ist ohne Binance kein zuverlässiger Exchange-Close-Feed möglich.")
+                st.error("Binance Futures ist nicht erreichbar. Für 4H/1W ist ohne Futures-Feed kein Exchange-Close möglich.")
                 return
 
     results = []
@@ -495,13 +519,14 @@ def main():
                 source = None
 
                 if not use_utc:
-                    pair = find_best_binance_pair(sym, symset)
+                    pair = find_best_futures_pair(sym, symset, only_usdt_perps=only_usdt_perps)
+
                     if pair:
-                        kl = binance_klines(pair, interval=interval, limit=200)
+                        kl = binance_futures_klines(pair, interval=interval, limit=200)
                         if len(kl) >= 15:
                             kl = kl[:-1]  # live candle weg
                             closed = [{"time": k["time"], "high": k["high"], "low": k["low"], "close": k["close"], "range": k["range"]} for k in kl]
-                            source = f"Binance {interval} ({pair})"
+                            source = f"Binance FUTURES {interval} ({pair})"
 
                     # Fallback nur für 1D
                     if (closed is None) and (tf == "1D"):
@@ -511,16 +536,16 @@ def main():
                                 closed = rows
                                 source = "CoinGecko UTC (fallback)"
                             else:
-                                skipped.append(f"{sym} (no data Binance+UTC)")
+                                skipped.append(f"{sym} (no data Futures+UTC)")
                                 progress.progress(i / len(scan_list))
                                 continue
                         else:
-                            skipped.append(f"{sym} (no Binance pair + no coingecko_id)")
+                            skipped.append(f"{sym} (no Futures pair + no coingecko_id)")
                             progress.progress(i / len(scan_list))
                             continue
 
                     if (closed is None) and (tf != "1D"):
-                        skipped.append(f"{sym} (no Binance pair)")
+                        skipped.append(f"{sym} (no Futures pair)")
                         progress.progress(i / len(scan_list))
                         continue
 
@@ -544,7 +569,6 @@ def main():
                     progress.progress(i / len(scan_list))
                     continue
 
-                # NR flags (last closed candle)
                 nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(closed)
                 last_nr10 = bool(nr10_flags[-1])
                 last_nr7 = bool(nr7_flags[-1])
@@ -554,8 +578,7 @@ def main():
                 nr7 = want_nr7 and last_nr7
                 nr4 = want_nr4 and last_nr4
 
-                # Breakouts + last setup range
-                setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, mid = simulate_breakouts_since_last_nr(closed)
+                setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl = simulate_breakouts_since_last_nr(closed)
 
                 last_close = float(closed[-1]["close"])
                 in_nr_range = False
@@ -564,16 +587,11 @@ def main():
                     hi = max(rl, rh)
                     in_nr_range = (lo <= last_close <= hi)
 
-                # Optional: Filter "nur im Range"
                 if show_inrange_only and (not in_nr_range):
                     progress.progress(i / len(scan_list))
                     continue
 
-                # Wir listen standardmäßig nur, wenn letzte Kerze NR10/NR7/NR4 ist
-                # ABER: Wenn "nur im Range" aktiv ist, zeigen wir auch Coins im Range,
-                # selbst wenn die letzte Kerze nicht NR war (Range vom letzten NR-Setup).
                 show_row = (nr10 or nr7 or nr4) or (show_inrange_only and in_nr_range)
-
                 if show_row:
                     results.append({
                         "symbol": sym,
@@ -614,7 +632,6 @@ def main():
             "nr_setup_type","nr_setup_time",
             "coingecko_id","source"
         ]]
-
         df = df.sort_values(
             ["in_nr_range_now","NR10","NR7","NR4","symbol"],
             ascending=[False, False, False, False, True]
