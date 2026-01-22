@@ -554,7 +554,7 @@ def main():
     # Header Card + Theme toggle
     header_left, header_right = st.columns([3, 1], vertical_alignment="center")
     with header_left:
-        st.markdown('<div class="nr-card"><div class="nr-card-title">Merlin"'"s NR Scanner</div><div class="nr-card-sub">Futures-Kerzen via ccxt · Auto-Fallback: Bitget → BingX → Bybit → MEXC → BloFin → OKX</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="nr-card"><div class="nr-card-title">Merlins NR Scanner</div><div class="nr-card-sub">Futures-Kerzen via ccxt · Auto-Fallback: Bitget → BingX → Bybit → MEXC → BloFin → OKX</div></div>', unsafe_allow_html=True)
 
     with header_right:
         theme_label = "🌙 Dark" if st.session_state["theme_mode"] == "dark" else "☀️ Light"
