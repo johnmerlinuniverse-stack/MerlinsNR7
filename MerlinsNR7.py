@@ -412,7 +412,7 @@ def short_ex(exchange_id: str) -> str:
 # -----------------------------
 def main():
     st.set_page_config(page_title="Merlin's NR Scanner (Futures)", layout="wide")
-    st.title("Merlins's NR Scanner (Futures)")
+    st.title("Merlin's NR Scanner (Futures)")
 
     # Mobile-friendly minimal CSS (reduces padding + makes tables feel tighter)
     st.markdown("""
