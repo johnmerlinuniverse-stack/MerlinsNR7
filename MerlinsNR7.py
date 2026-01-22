@@ -171,7 +171,7 @@ html, body, [data-testid="stAppViewContainer"] {{
 }}
 /* Header spacing */
 .block-container {{
-  padding-top: 2.9rem;
+  padding-top: 3.1rem;
   padding-bottom: 1.2rem;
   max-width: 1100px;
 }}
