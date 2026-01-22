@@ -130,7 +130,6 @@ S
 # Theme CSS (Light/Dark Toggle)
 # -----------------------------
 def inject_theme_css(mode: str):
-    # mode: "dark" or "light"
     if mode == "dark":
         bg = "#0B0F17"
         card = "#111827"
@@ -169,13 +168,11 @@ html, body, [data-testid="stAppViewContainer"] {{
   background: var(--bg) !important;
   color: var(--text) !important;
 }}
-/* Header spacing */
 .block-container {{
-  padding-top: 3.1rem;
+  padding-top: 2.4rem; /* mehr Abstand nach oben */
   padding-bottom: 1.2rem;
   max-width: 1100px;
 }}
-/* Cards */
 .nr-card {{
   background: var(--card);
   border: 1px solid var(--border);
@@ -212,20 +209,10 @@ html, body, [data-testid="stAppViewContainer"] {{
   background: var(--border);
   margin: 12px 0;
 }}
-/* Inputs */
-div[data-testid="stTextArea"] textarea,
-div[data-testid="stNumberInput"] input,
-div[data-testid="stSelectbox"] div,
-div[data-testid="stRadio"] div,
-div[data-testid="stCheckbox"] div {{
-  color: var(--text) !important;
-}}
-/* Try to tint inputs */
 textarea, input {{
   background: var(--inputbg) !important;
   border-radius: 12px !important;
 }}
-/* Buttons */
 .stButton > button {{
   border-radius: 12px !important;
   border: 1px solid var(--border) !important;
@@ -236,18 +223,15 @@ textarea, input {{
 .stButton > button:hover {{
   border-color: rgba(96,165,250,0.35) !important;
 }}
-/* Dataframe wrapper */
 div[data-testid="stDataFrame"] {{
   border-radius: 16px;
   overflow: hidden;
   border: 1px solid var(--border);
   background: var(--tablebg) !important;
 }}
-/* Reduce layout gaps */
 div[data-testid="stHorizontalBlock"] {{
   gap: 0.7rem;
 }}
-/* Make expander look cleaner */
 details {{
   border-radius: 14px;
   border: 1px solid var(--border);
@@ -441,7 +425,7 @@ def fetch_ohlcv_ccxt(exchange_id: str, ccxt_symbol: str, timeframe: str, limit: 
     ohlcv = ex.fetch_ohlcv(ccxt_symbol, timeframe=timeframe, limit=limit)
     if not ohlcv or len(ohlcv) < 15:
         return None
-    ohlcv = ohlcv[:-1]
+    ohlcv = ohlcv[:-1]  # remove in-progress candle
     if len(ohlcv) < 12:
         return None
     rows = []
@@ -475,9 +459,15 @@ def compute_nr_flags(closed):
     return nr4, nr7, nr10
 
 def simulate_breakouts_since_last_nr(closed):
+    """
+    Returns:
+    setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, last_breakout_index
+    """
     if len(closed) < 12:
-        return "", "", "-", "-", 0, 0, None, None
+        return "", "", "-", "-", 0, 0, None, None, None
+
     nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(closed)
+
     setup_idx = -1
     setup_type = ""
     for i in range(len(closed) - 1, -1, -1):
@@ -485,20 +475,27 @@ def simulate_breakouts_since_last_nr(closed):
             setup_idx = i
             setup_type = "NR10" if nr10_flags[i] else ("NR7" if nr7_flags[i] else "NR4")
             break
+
     if setup_idx == -1:
-        return "", "", "-", "-", 0, 0, None, None
+        return "", "", "-", "-", 0, 0, None, None, None
+
     rh = closed[setup_idx]["high"]
     rl = closed[setup_idx]["low"]
     mid = (rh + rl) / 2.0
+
     up_check = True
     down_check = True
     up_count = 0
     down_count = 0
     breakout_state = "-"
     breakout_tag = "-"
+    last_breakout_index = None
+
     for j in range(setup_idx + 1, len(closed)):
         prev_close = closed[j - 1]["close"]
         cur_close = closed[j]["close"]
+
+        # Down breakout gating (LuxAlgo style)
         if cur_close > mid and down_check is False:
             down_check = True
         if (prev_close >= rl) and (cur_close < rl) and down_check:
@@ -506,6 +503,9 @@ def simulate_breakouts_since_last_nr(closed):
             down_check = False
             breakout_state = "DOWN"
             breakout_tag = f"DOWN#{down_count}"
+            last_breakout_index = j
+
+        # Up breakout gating (LuxAlgo style)
         if cur_close < mid and up_check is False:
             up_check = True
         if (prev_close <= rh) and (cur_close > rh) and up_check:
@@ -513,8 +513,10 @@ def simulate_breakouts_since_last_nr(closed):
             up_check = False
             breakout_state = "UP"
             breakout_tag = f"UP#{up_count}"
+            last_breakout_index = j
+
     setup_time = closed[setup_idx]["time"]
-    return setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl
+    return setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, last_breakout_index
 
 # -----------------------------
 # Display helpers
@@ -533,8 +535,14 @@ def mk_breakout_badge(state: str, tag: str) -> str:
         return f"🔴 ▼ {tag}"
     return "—"
 
-def mk_range_badge(in_range: bool) -> str:
-    return "✅ InRange" if in_range else "—"
+def mk_state_badge(state: str) -> str:
+    if state == "Above":
+        return "🟩 Above"
+    if state == "Below":
+        return "🟥 Below"
+    if state == "Inside":
+        return "🟦 Inside"
+    return "—"
 
 def short_ex(exchange_id: str) -> str:
     if exchange_id == "coingecko":
@@ -545,17 +553,17 @@ def short_ex(exchange_id: str) -> str:
 # App
 # -----------------------------
 def main():
-    st.set_page_config(page_title="Merlin's NR Scanner", layout="wide")
+    st.set_page_config(page_title="NR Scanner (Futures)", layout="wide")
 
-    # default theme
     if "theme_mode" not in st.session_state:
         st.session_state["theme_mode"] = "dark"
 
-    # Header Card + Theme toggle
+    # Spacer (falls mobile header zu knapp ist)
+    st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
+
     header_left, header_right = st.columns([3, 1], vertical_alignment="center")
     with header_left:
-        st.markdown('<div class="nr-card"><div class="nr-card-title">Merlins NR Scanner</div><div class="nr-card-sub">Futures-Kerzen via ccxt · Auto-Fallback: Bitget → BingX → Bybit → MEXC → BloFin → OKX</div></div>', unsafe_allow_html=True)
-
+        st.markdown('<div class="nr-card"><div class="nr-card-title">NR Scanner (Futures)</div><div class="nr-card-sub">Futures-Kerzen via ccxt · Auto-Fallback: Bitget → BingX → Bybit → MEXC → BloFin → OKX</div></div>', unsafe_allow_html=True)
     with header_right:
         theme_label = "🌙 Dark" if st.session_state["theme_mode"] == "dark" else "☀️ Light"
         if st.button(f"Theme: {theme_label}", use_container_width=True):
@@ -564,7 +572,6 @@ def main():
 
     inject_theme_css(st.session_state["theme_mode"])
 
-    # Controls Card
     st.markdown('<div class="nr-card">', unsafe_allow_html=True)
     cA, cB = st.columns([1, 1])
     with cA:
@@ -581,15 +588,14 @@ def main():
     with st.expander("ℹ️ Unterschied: Exchange Close vs UTC"):
         st.markdown("""
 **Exchange Close (Futures / Börsen-Close)**  
-- Wir nutzen die **Futures/SWAP-Kerzen** direkt von deiner Börse (Bitget/BingX/Bybit/MEXC/BloFin/OKX).  
-- Tages-Close = Close der **Börsen-Kerze** (Tagesgrenze kann je nach Börse minimal abweichen).  
-- ✅ Vorteil: passt zu deinem Futures-Trading & Exchange-Feed.
+- Wir nutzen Futures/SWAP-Kerzen direkt von der Börse.  
+- Tages-Close = Close der Börsen-Kerze (Tagesgrenze kann leicht abweichen).  
+- ✅ Vorteil: passt zum Futures-Feed der Börse.
 
 **UTC (letzte abgeschlossene Tageskerze)**  
-- Ein Tag läuft **00:00–23:59 UTC**.  
-- Wir nehmen die letzte **vollständig abgeschlossene** UTC-Tageskerze.  
-- ✅ Vorteil: einheitlich/vergleichbar  
-- ❌ Nachteil: langsamer + kann leicht vom Exchange-Close abweichen.
+- 00:00–23:59 UTC, letzte vollständig abgeschlossene Tageskerze.  
+- ✅ Vorteil: einheitlich  
+- ❌ Nachteil: langsamer & kann leicht abweichen.
         """)
 
     p1, p2, p3 = st.columns(3)
@@ -598,11 +604,9 @@ def main():
     want_nr10 = p3.checkbox("NR10", value=False)
 
     show_inrange_only = st.checkbox("Nur Coins anzeigen, die aktuell im NR-Range sind", value=False)
-
     view_mode = st.radio("Ansicht", ["Kompakt (Mobile)", "Detail (Desktop)"], index=0, horizontal=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Universe configs
     top_n = 150
     stable_toggle = False
     tickers_text = None
@@ -620,12 +624,10 @@ def main():
         tickers_text = st.text_area("Ticker (1 pro Zeile)", value=CW_DEFAULT_TICKERS, height=110)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ccxt check
     if ccxt is None:
         st.error("ccxt ist nicht installiert. Bitte 'ccxt' in requirements.txt hinzufügen und neu deployen.")
         return
 
-    # Scan Button
     st.markdown('<div class="nr-card">', unsafe_allow_html=True)
     run = st.button("🚀 Scan starten", use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
@@ -645,7 +647,6 @@ def main():
     else:
         provider_chain = PROVIDER_CHAIN[:]
 
-    # Build scan list
     scan_list = []
     if universe == "CoinGecko Top N":
         if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
@@ -680,16 +681,13 @@ def main():
             data_source = ""
             last_reason = None
 
-            # Futures chain
             for ex_id in provider_chain:
                 try:
                     if not hasattr(ccxt, ex_id):
                         last_reason = f"{ex_id}: not supported"
                         continue
 
-                    # load markets (cached)
                     _ = load_markets_cached(ex_id)
-
                     sym = find_ccxt_futures_symbol(ex_id, base)
                     if not sym:
                         last_reason = f"{ex_id}: symbol not listed"
@@ -718,7 +716,6 @@ def main():
                         last_reason = f"{ex_id}: error"
                     continue
 
-            # Optional UTC fallback (only 1D)
             if (closed is None) and allow_utc_fallback and tf == "1D":
                 try:
                     if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
@@ -752,14 +749,29 @@ def main():
                 nr7 = want_nr7 and last_nr7
                 nr4 = want_nr4 and last_nr4
 
-                setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl = simulate_breakouts_since_last_nr(closed)
+                setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, last_break_idx = simulate_breakouts_since_last_nr(closed)
                 last_close = float(closed[-1]["close"])
 
+                # State (Above/Below/Inside)
+                price_state = "—"
                 in_nr_range = False
                 if rh is not None and rl is not None:
                     lo = min(rl, rh)
                     hi = max(rl, rh)
-                    in_nr_range = (lo <= last_close <= hi)
+                    if last_close > hi:
+                        price_state = "Above"
+                    elif last_close < lo:
+                        price_state = "Below"
+                    else:
+                        price_state = "Inside"
+                        in_nr_range = True
+
+                # Bars since last breakout
+                bars_since = "-"
+                if isinstance(last_break_idx, int):
+                    bars_since = (len(closed) - 1) - last_break_idx
+                    if bars_since < 0:
+                        bars_since = "-"
 
                 if show_inrange_only and (not in_nr_range):
                     progress.progress(i / len(scan_list))
@@ -774,6 +786,8 @@ def main():
                         "NR7": nr7,
                         "NR4": nr4,
                         "in_nr_range_now": in_nr_range,
+                        "price_state": price_state,
+                        "bars_since_breakout": bars_since,
                         "breakout_state": breakout_state,
                         "breakout_tag": breakout_tag,
                         "nr_setup_type": setup_type,
@@ -802,14 +816,13 @@ def main():
                     st.write(e)
         return
 
-    # Sort
     df = df.sort_values(["in_nr_range_now","NR10","NR7","NR4","symbol"], ascending=[False, False, False, False, True]).reset_index(drop=True)
 
-    # Display dataframe prep
     df_disp = df.copy()
     df_disp["Pattern"] = df_disp.apply(lambda r: mk_pattern_badge(bool(r["NR10"]), bool(r["NR7"]), bool(r["NR4"])), axis=1)
-    df_disp["Range"] = df_disp["in_nr_range_now"].apply(lambda x: mk_range_badge(bool(x)))
     df_disp["Breakout"] = df_disp.apply(lambda r: mk_breakout_badge(str(r["breakout_state"]), str(r["breakout_tag"])), axis=1)
+    df_disp["BarsSince"] = df_disp["bars_since_breakout"]
+    df_disp["State"] = df_disp["price_state"].apply(lambda s: mk_state_badge(str(s)))
     df_disp["Ex"] = df_disp["exchange_used"].apply(short_ex)
 
     st.markdown('<div class="nr-card">', unsafe_allow_html=True)
@@ -822,7 +835,8 @@ def main():
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
     if view_mode == "Kompakt (Mobile)":
-        compact = df_disp[["symbol","Pattern","Range","Breakout","Ex"]].copy()
+        # Mobile: kompakt & nicht zu breit
+        compact = df_disp[["symbol","Pattern","State","Breakout","BarsSince","Ex"]].copy()
         compact.rename(columns={"symbol":"Coin"}, inplace=True)
         st.dataframe(compact, use_container_width=True, hide_index=True)
 
@@ -831,15 +845,16 @@ def main():
                 with st.expander(f"{r['symbol']} — {r['name']}"):
                     st.write(f"**Provider:** {r['exchange_used']}  |  **Pair:** {r['pair_used']}  |  **Quelle:** {r['data_source']}")
                     st.write(f"**Pattern:** {r['Pattern']}")
-                    st.write(f"**Range:** {r['Range']}")
+                    st.write(f"**State:** {r['State']}  |  **BarsSince:** {r['BarsSince']}")
                     st.write(f"**Breakout:** {r['Breakout']}")
                     st.write(f"**NR Setup:** {r['nr_setup_type']} @ {r['nr_setup_time']}")
                     st.write(f"**Last Close:** {r['last_close']}")
                     st.write(f"**Range Low/High:** {r['range_low']} / {r['range_high']}")
                     if r.get("coingecko_id"):
                         st.caption(f"coingecko_id: {r['coingecko_id']}")
+
     else:
-        detail = df_disp[["symbol","name","Pattern","Range","Breakout","nr_setup_type","nr_setup_time","Ex","data_source"]].copy()
+        detail = df_disp[["symbol","name","Pattern","State","Breakout","BarsSince","nr_setup_type","nr_setup_time","Ex","data_source"]].copy()
         detail.rename(columns={"symbol":"Coin","name":"Name","nr_setup_type":"Setup","nr_setup_time":"Setup Time","data_source":"Source"}, inplace=True)
         st.dataframe(detail, use_container_width=True, hide_index=True)
 
@@ -848,7 +863,13 @@ def main():
             tech.rename(columns={"symbol":"Coin"}, inplace=True)
             st.dataframe(tech, use_container_width=True, hide_index=True)
 
-    st.download_button("CSV Export (voll)", df.to_csv(index=False).encode("utf-8"), file_name=f"nr_scan_{tf}.csv", mime="text/csv", use_container_width=True)
+    st.download_button(
+        "CSV Export (voll)",
+        df.to_csv(index=False).encode("utf-8"),
+        file_name=f"nr_scan_{tf}.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
 
     st.markdown('</div>', unsafe_allow_html=True)
 
