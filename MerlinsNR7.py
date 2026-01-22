@@ -127,7 +127,142 @@ S
 """.strip()
 
 # -----------------------------
-# Helpers: CoinGecko (nur wenn genutzt)
+# Theme CSS (Light/Dark Toggle)
+# -----------------------------
+def inject_theme_css(mode: str):
+    # mode: "dark" or "light"
+    if mode == "dark":
+        bg = "#0B0F17"
+        card = "#111827"
+        card2 = "#0F172A"
+        text = "#E5E7EB"
+        muted = "#9CA3AF"
+        border = "rgba(255,255,255,0.08)"
+        accent = "#60A5FA"
+        tablebg = "#0F172A"
+        inputbg = "#0B1220"
+    else:
+        bg = "#F6F7FB"
+        card = "#FFFFFF"
+        card2 = "#FFFFFF"
+        text = "#111827"
+        muted = "#6B7280"
+        border = "rgba(17,24,39,0.10)"
+        accent = "#2563EB"
+        tablebg = "#FFFFFF"
+        inputbg = "#FFFFFF"
+
+    st.markdown(f"""
+<style>
+:root {{
+  --bg: {bg};
+  --card: {card};
+  --card2: {card2};
+  --text: {text};
+  --muted: {muted};
+  --border: {border};
+  --accent: {accent};
+  --tablebg: {tablebg};
+  --inputbg: {inputbg};
+}}
+html, body, [data-testid="stAppViewContainer"] {{
+  background: var(--bg) !important;
+  color: var(--text) !important;
+}}
+/* Header spacing */
+.block-container {{
+  padding-top: 0.9rem;
+  padding-bottom: 1.2rem;
+  max-width: 1100px;
+}}
+/* Cards */
+.nr-card {{
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 14px 14px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.10);
+}}
+.nr-card-title {{
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}}
+.nr-card-sub {{
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 2px;
+}}
+.badge {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  background: var(--card2);
+  font-size: 12px;
+  color: var(--text);
+}}
+.badge-accent {{
+  border-color: rgba(96,165,250,0.35);
+}}
+.hr {{
+  height: 1px;
+  background: var(--border);
+  margin: 12px 0;
+}}
+/* Inputs */
+div[data-testid="stTextArea"] textarea,
+div[data-testid="stNumberInput"] input,
+div[data-testid="stSelectbox"] div,
+div[data-testid="stRadio"] div,
+div[data-testid="stCheckbox"] div {{
+  color: var(--text) !important;
+}}
+/* Try to tint inputs */
+textarea, input {{
+  background: var(--inputbg) !important;
+  border-radius: 12px !important;
+}}
+/* Buttons */
+.stButton > button {{
+  border-radius: 12px !important;
+  border: 1px solid var(--border) !important;
+  background: var(--card) !important;
+  color: var(--text) !important;
+  font-weight: 700 !important;
+}}
+.stButton > button:hover {{
+  border-color: rgba(96,165,250,0.35) !important;
+}}
+/* Dataframe wrapper */
+div[data-testid="stDataFrame"] {{
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--tablebg) !important;
+}}
+/* Reduce layout gaps */
+div[data-testid="stHorizontalBlock"] {{
+  gap: 0.7rem;
+}}
+/* Make expander look cleaner */
+details {{
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  padding: 6px 10px;
+}}
+summary {{
+  color: var(--text);
+  font-weight: 700;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+# -----------------------------
+# CoinGecko helpers (only used when needed)
 # -----------------------------
 _CG_LAST_CALL = 0.0
 
@@ -256,7 +391,6 @@ def load_markets_cached(exchange_id: str):
     return ex.load_markets()
 
 def _is_usdt_linear_perp_market(m: dict) -> bool:
-    base = (m.get("base") or "")
     quote = (m.get("quote") or "")
     active = m.get("active", True)
     is_swap = bool(m.get("swap", False))
@@ -265,7 +399,6 @@ def _is_usdt_linear_perp_market(m: dict) -> bool:
     contract_type = m.get("type") or ""
     settle = (m.get("settle") or "")
     linear = bool(m.get("linear", False)) or (settle == "USDT")
-
     if not active:
         return False
     if quote != "USDT":
@@ -384,46 +517,55 @@ def simulate_breakouts_since_last_nr(closed):
     return setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl
 
 # -----------------------------
-# Display helpers (compact/mobile)
+# Display helpers
 # -----------------------------
 def mk_pattern_badge(nr10: bool, nr7: bool, nr4: bool) -> str:
     parts = []
-    if nr10: parts.append("🟣NR10")
-    if nr7:  parts.append("🟡NR7")
-    if nr4:  parts.append("🟢NR4")
+    if nr10: parts.append("🟣 NR10")
+    if nr7:  parts.append("🟡 NR7")
+    if nr4:  parts.append("🟢 NR4")
     return " ".join(parts) if parts else "—"
 
 def mk_breakout_badge(state: str, tag: str) -> str:
     if state == "UP":
-        return f"🟢▲ {tag}"
+        return f"🟢 ▲ {tag}"
     if state == "DOWN":
-        return f"🔴▼ {tag}"
+        return f"🔴 ▼ {tag}"
     return "—"
 
 def mk_range_badge(in_range: bool) -> str:
     return "✅ InRange" if in_range else "—"
 
 def short_ex(exchange_id: str) -> str:
-    if exchange_id == "coingecko": return "UTC"
+    if exchange_id == "coingecko":
+        return "UTC"
     return exchange_id.upper()
 
 # -----------------------------
 # App
 # -----------------------------
 def main():
-    st.set_page_config(page_title="Merlin's NR Scanner (Futures)", layout="wide")
-    st.title("Merlin's NR Scanner (Futures)")
+    st.set_page_config(page_title="Merlin's NR Scanner", layout="wide")
 
-    # Mobile-friendly minimal CSS (reduces padding + makes tables feel tighter)
-    st.markdown("""
-<style>
-.block-container { padding-top: 0.8rem; padding-bottom: 1.2rem; }
-div[data-testid="stHorizontalBlock"] { gap: 0.6rem; }
-div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
-</style>
-""", unsafe_allow_html=True)
+    # default theme
+    if "theme_mode" not in st.session_state:
+        st.session_state["theme_mode"] = "dark"
 
-    # Top Controls (2 columns, works better on mobile too)
+    # Header Card + Theme toggle
+    header_left, header_right = st.columns([3, 1], vertical_alignment="center")
+    with header_left:
+        st.markdown('<div class="nr-card"><div class="nr-card-title">Merlin's NR Scanner</div><div class="nr-card-sub">Futures-Kerzen via ccxt · Auto-Fallback: Bitget → BingX → Bybit → MEXC → BloFin → OKX</div></div>', unsafe_allow_html=True)
+
+    with header_right:
+        theme_label = "🌙 Dark" if st.session_state["theme_mode"] == "dark" else "☀️ Light"
+        if st.button(f"Theme: {theme_label}", use_container_width=True):
+            st.session_state["theme_mode"] = "light" if st.session_state["theme_mode"] == "dark" else "dark"
+            st.rerun()
+
+    inject_theme_css(st.session_state["theme_mode"])
+
+    # Controls Card
+    st.markdown('<div class="nr-card">', unsafe_allow_html=True)
     cA, cB = st.columns([1, 1])
     with cA:
         universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top N"], index=0)
@@ -436,22 +578,20 @@ div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
         )
         allow_utc_fallback = st.checkbox("UTC-Fallback (CoinGecko)", value=False)
 
-    # Explanation (as requested)
     with st.expander("ℹ️ Unterschied: Exchange Close vs UTC"):
         st.markdown("""
 **Exchange Close (Futures / Börsen-Close)**  
-- Wir verwenden **Futures/SWAP-Kerzen** direkt von der gewählten Börse (Bitget/BingX/Bybit/MEXC/BloFin/OKX).  
-- Tages-Close = Close der **Börsen-Kerze** (je nach Börse kann die “Tagesgrenze” minimal abweichen).  
-- ✅ Vorteil: passt zu deinem Futures-Trading & Orderfeed.
+- Wir nutzen die **Futures/SWAP-Kerzen** direkt von deiner Börse (Bitget/BingX/Bybit/MEXC/BloFin/OKX).  
+- Tages-Close = Close der **Börsen-Kerze** (Tagesgrenze kann je nach Börse minimal abweichen).  
+- ✅ Vorteil: passt zu deinem Futures-Trading & Exchange-Feed.
 
 **UTC (letzte abgeschlossene Tageskerze)**  
-- Ein Tag läuft immer von **00:00 bis 23:59 UTC**.  
-- Wir nutzen die letzte **vollständig abgeschlossene** UTC-Tageskerze.  
+- Ein Tag läuft **00:00–23:59 UTC**.  
+- Wir nehmen die letzte **vollständig abgeschlossene** UTC-Tageskerze.  
 - ✅ Vorteil: einheitlich/vergleichbar  
-- ❌ Nachteil: langsamer (mehr API-Requests) und kann leicht vom Exchange-Close abweichen.
+- ❌ Nachteil: langsamer + kann leicht vom Exchange-Close abweichen.
         """)
 
-    # Pattern checkboxes
     p1, p2, p3 = st.columns(3)
     want_nr7 = p1.checkbox("NR7", value=True)
     want_nr4 = p2.checkbox("NR4", value=False)
@@ -459,8 +599,8 @@ div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
 
     show_inrange_only = st.checkbox("Nur Coins anzeigen, die aktuell im NR-Range sind", value=False)
 
-    # View mode: Compact default (mobile)
     view_mode = st.radio("Ansicht", ["Kompakt (Mobile)", "Detail (Desktop)"], index=0, horizontal=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # Universe configs
     top_n = 150
@@ -469,18 +609,27 @@ div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
     cw_map = load_cw_id_map()
 
     if universe == "CoinGecko Top N":
+        st.markdown('<div class="nr-card">', unsafe_allow_html=True)
         top_n = st.number_input("Top N", min_value=10, max_value=500, value=150, step=10)
         stable_toggle = st.checkbox("Stablecoins scannen", value=False)
         if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
-            st.info("Hinweis: Für CoinGecko Top-N brauchst du COINGECKO_DEMO_API_KEY in Streamlit Secrets.")
+            st.info("Für CoinGecko Top-N brauchst du COINGECKO_DEMO_API_KEY in Streamlit Secrets.")
+        st.markdown('</div>', unsafe_allow_html=True)
     else:
+        st.markdown('<div class="nr-card">', unsafe_allow_html=True)
         tickers_text = st.text_area("Ticker (1 pro Zeile)", value=CW_DEFAULT_TICKERS, height=110)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    if not ccxt_available():
+    # ccxt check
+    if ccxt is None:
         st.error("ccxt ist nicht installiert. Bitte 'ccxt' in requirements.txt hinzufügen und neu deployen.")
         return
 
-    run = st.button("Scan", use_container_width=True)
+    # Scan Button
+    st.markdown('<div class="nr-card">', unsafe_allow_html=True)
+    run = st.button("🚀 Scan starten", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
     if not run:
         return
     if not (want_nr7 or want_nr4 or want_nr10):
@@ -519,7 +668,7 @@ div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
     results, skipped, errors = [], [], []
     progress = st.progress(0)
 
-    with st.spinner("Scanne... (Futures zuerst, optional UTC Fallback)"):
+    with st.spinner("Scanne..."):
         for i, item in enumerate(scan_list, 1):
             base = item["symbol"]
             name = item.get("name", base)
@@ -535,22 +684,28 @@ div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
             for ex_id in provider_chain:
                 try:
                     if not hasattr(ccxt, ex_id):
-                        last_reason = f"{ex_id}: not supported by ccxt"
+                        last_reason = f"{ex_id}: not supported"
                         continue
+
+                    # load markets (cached)
                     _ = load_markets_cached(ex_id)
+
                     sym = find_ccxt_futures_symbol(ex_id, base)
                     if not sym:
                         last_reason = f"{ex_id}: symbol not listed"
                         continue
+
                     rows = fetch_ohlcv_ccxt(ex_id, sym, timeframe=ccxt_tf, limit=200)
                     if not rows:
-                        last_reason = f"{ex_id}: no data / too short"
+                        last_reason = f"{ex_id}: no data"
                         continue
+
                     closed = rows
                     exchange_used = ex_id
                     pair_used = sym
                     data_source = "Futures"
                     break
+
                 except Exception as e:
                     msg = str(e)
                     if "451" in msg:
@@ -563,7 +718,7 @@ div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
                         last_reason = f"{ex_id}: error"
                     continue
 
-            # Optional UTC fallback (nur 1D)
+            # Optional UTC fallback (only 1D)
             if (closed is None) and allow_utc_fallback and tf == "1D":
                 try:
                     if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
@@ -648,75 +803,55 @@ div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
         return
 
     # Sort
-    df = df.sort_values(
-        ["in_nr_range_now","NR10","NR7","NR4","symbol"],
-        ascending=[False, False, False, False, True]
-    ).reset_index(drop=True)
+    df = df.sort_values(["in_nr_range_now","NR10","NR7","NR4","symbol"], ascending=[False, False, False, False, True]).reset_index(drop=True)
 
-    # Build display columns
+    # Display dataframe prep
     df_disp = df.copy()
-    df_disp["pattern"] = df_disp.apply(lambda r: mk_pattern_badge(bool(r["NR10"]), bool(r["NR7"]), bool(r["NR4"])), axis=1)
-    df_disp["breakout"] = df_disp.apply(lambda r: mk_breakout_badge(str(r["breakout_state"]), str(r["breakout_tag"])), axis=1)
-    df_disp["range_now"] = df_disp["in_nr_range_now"].apply(lambda x: mk_range_badge(bool(x)))
-    df_disp["ex"] = df_disp["exchange_used"].apply(short_ex)
+    df_disp["Pattern"] = df_disp.apply(lambda r: mk_pattern_badge(bool(r["NR10"]), bool(r["NR7"]), bool(r["NR4"])), axis=1)
+    df_disp["Range"] = df_disp["in_nr_range_now"].apply(lambda x: mk_range_badge(bool(x)))
+    df_disp["Breakout"] = df_disp.apply(lambda r: mk_breakout_badge(str(r["breakout_state"]), str(r["breakout_tag"])), axis=1)
+    df_disp["Ex"] = df_disp["exchange_used"].apply(short_ex)
 
-    st.write(f"Treffer: {len(df_disp)} | Skipped: {len(skipped)} | Errors: {len(errors)}")
+    st.markdown('<div class="nr-card">', unsafe_allow_html=True)
+    st.markdown(f"""
+<div class="badge badge-accent">✅ Treffer: <b>{len(df_disp)}</b></div>
+<div style="height:8px"></div>
+<div class="badge">⏭️ Skipped: <b>{len(skipped)}</b></div>
+<div class="badge">⚠️ Errors: <b>{len(errors)}</b></div>
+""", unsafe_allow_html=True)
+    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
     if view_mode == "Kompakt (Mobile)":
-        # Mobile: wenige Spalten, keine breiten Werte
-        compact = df_disp[["symbol","pattern","range_now","breakout","ex"]].copy()
-        compact.rename(columns={"symbol":"Coin","pattern":"Pattern","range_now":"Range","breakout":"Breakout","ex":"Ex"}, inplace=True)
+        compact = df_disp[["symbol","Pattern","Range","Breakout","Ex"]].copy()
+        compact.rename(columns={"symbol":"Coin"}, inplace=True)
         st.dataframe(compact, use_container_width=True, hide_index=True)
 
         with st.expander("Details zu Treffern"):
-            # Details per Coin als “Cards”
             for _, r in df_disp.iterrows():
-                title = f"{r['symbol']} — {r['name']}"
-                with st.expander(title):
+                with st.expander(f"{r['symbol']} — {r['name']}"):
                     st.write(f"**Provider:** {r['exchange_used']}  |  **Pair:** {r['pair_used']}  |  **Quelle:** {r['data_source']}")
-                    st.write(f"**Pattern:** {mk_pattern_badge(bool(r['NR10']), bool(r['NR7']), bool(r['NR4']))}")
-                    st.write(f"**In Range:** {bool(r['in_nr_range_now'])}")
-                    st.write(f"**Breakout:** {mk_breakout_badge(str(r['breakout_state']), str(r['breakout_tag']))}  (UP={int(r.get('breakout_tag','-').startswith('UP'))})")
+                    st.write(f"**Pattern:** {r['Pattern']}")
+                    st.write(f"**Range:** {r['Range']}")
+                    st.write(f"**Breakout:** {r['Breakout']}")
                     st.write(f"**NR Setup:** {r['nr_setup_type']} @ {r['nr_setup_time']}")
                     st.write(f"**Last Close:** {r['last_close']}")
                     st.write(f"**Range Low/High:** {r['range_low']} / {r['range_high']}")
                     if r.get("coingecko_id"):
                         st.caption(f"coingecko_id: {r['coingecko_id']}")
-
     else:
-        # Desktop: mehr Infos, aber immer noch übersichtlich
-        detail = df_disp[[
-            "symbol","name","pattern","range_now","breakout",
-            "nr_setup_type","nr_setup_time","ex","data_source"
-        ]].copy()
-        detail.rename(columns={
-            "symbol":"Coin","name":"Name","pattern":"Pattern","range_now":"Range",
-            "breakout":"Breakout","nr_setup_type":"Setup","nr_setup_time":"Setup Time",
-            "ex":"Exchange","data_source":"Source"
-        }, inplace=True)
+        detail = df_disp[["symbol","name","Pattern","Range","Breakout","nr_setup_type","nr_setup_time","Ex","data_source"]].copy()
+        detail.rename(columns={"symbol":"Coin","name":"Name","nr_setup_type":"Setup","nr_setup_time":"Setup Time","data_source":"Source"}, inplace=True)
         st.dataframe(detail, use_container_width=True, hide_index=True)
 
         with st.expander("Technische Details (Pair/Range/Close)"):
-            tech = df_disp[[
-                "symbol","exchange_used","pair_used","data_source","last_close","range_low","range_high","coingecko_id"
-            ]].copy()
-            tech.rename(columns={
-                "symbol":"Coin","exchange_used":"exchange_used","pair_used":"pair_used",
-                "data_source":"data_source","last_close":"last_close",
-                "range_low":"range_low","range_high":"range_high","coingecko_id":"coingecko_id"
-            }, inplace=True)
+            tech = df_disp[["symbol","exchange_used","pair_used","data_source","last_close","range_low","range_high","coingecko_id"]].copy()
+            tech.rename(columns={"symbol":"Coin"}, inplace=True)
             st.dataframe(tech, use_container_width=True, hide_index=True)
 
-    # CSV
-    st.download_button(
-        "CSV Export (voll)",
-        df.to_csv(index=False).encode("utf-8"),
-        file_name=f"nr_scan_{tf}.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
+    st.download_button("CSV Export (voll)", df.to_csv(index=False).encode("utf-8"), file_name=f"nr_scan_{tf}.csv", mime="text/csv", use_container_width=True)
 
-    # Dezent Report
+    st.markdown('</div>', unsafe_allow_html=True)
+
     if skipped or errors:
         with st.expander("Report (nicht gescannt / Fehler)"):
             if skipped:
