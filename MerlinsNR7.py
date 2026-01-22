@@ -14,9 +14,6 @@ try:
 except Exception:
     ccxt = None
 
-# -----------------------------
-# CoinGecko
-# -----------------------------
 CG_BASE = "https://api.coingecko.com/api/v3"
 
 CW_DEFAULT_TICKERS = """
@@ -202,7 +199,6 @@ def is_stablecoin_marketrow(row: dict) -> bool:
 @st.cache_data(ttl=6*3600)
 def cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30):
     raw = cg_get(f"/coins/{coin_id}/ohlc", {"vs_currency": vs, "days": days_fetch}, max_retries=10, min_interval_sec=1.2)
-
     day = {}
     for ts, o, h, l, c in raw:
         dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
@@ -215,19 +211,11 @@ def cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30):
             if ts > day[key]["last_ts"]:
                 day[key]["close"] = c
                 day[key]["last_ts"] = ts
-
     today_utc = datetime.now(timezone.utc).date().isoformat()
     keys = sorted(k for k in day.keys() if k != today_utc)
-
     rows = []
     for k in keys:
-        rows.append({
-            "time": k,
-            "high": float(day[k]["high"]),
-            "low": float(day[k]["low"]),
-            "close": float(day[k]["close"]),
-            "range": float(day[k]["high"] - day[k]["low"]),
-        })
+        rows.append({"time": k, "high": float(day[k]["high"]), "low": float(day[k]["low"]), "close": float(day[k]["close"]), "range": float(day[k]["high"] - day[k]["low"])})
     return rows
 
 def load_cw_id_map():
@@ -246,15 +234,11 @@ def ccxt_available():
     return ccxt is not None
 
 def _make_exchange(exchange_id: str):
-    # enableRateLimit schützt vor harten rate-limits
     klass = getattr(ccxt, exchange_id)
     ex = klass({"enableRateLimit": True, "timeout": 20000})
-
-    # Futures/Swap Default (best effort; ccxt ist je nach Exchange leicht anders)
     opt = ex.options if hasattr(ex, "options") and isinstance(ex.options, dict) else {}
-    # Häufige Standards:
     if exchange_id in ["bybit", "okx", "bitget", "bingx", "mexc", "blofin"]:
-        opt = {**opt, "defaultType": "swap"}  # linear perps / swaps
+        opt = {**opt, "defaultType": "swap"}
     ex.options = opt
     return ex
 
@@ -269,21 +253,16 @@ def get_exchange_client(exchange_id: str):
 @st.cache_data(ttl=3600)
 def load_markets_cached(exchange_id: str):
     ex = get_exchange_client(exchange_id)
-    markets = ex.load_markets()
-    # markets ist dict: symbol -> market
-    return markets
+    return ex.load_markets()
 
 def _is_usdt_linear_perp_market(m: dict) -> bool:
-    # ccxt market fields variieren leicht, daher robust checken:
     base = (m.get("base") or "")
     quote = (m.get("quote") or "")
     active = m.get("active", True)
-    # type / swap / future info
     is_swap = bool(m.get("swap", False))
     is_future = bool(m.get("future", False))
     is_contract = bool(m.get("contract", False))
     contract_type = m.get("type") or ""
-    # linear markets haben oft settle == quote (USDT)
     settle = (m.get("settle") or "")
     linear = bool(m.get("linear", False)) or (settle == "USDT")
 
@@ -293,16 +272,11 @@ def _is_usdt_linear_perp_market(m: dict) -> bool:
         return False
     if not (is_swap or is_future or is_contract or contract_type in ["swap", "future"]):
         return False
-    # bevorzugt linear (USDT-margined)
     if linear:
         return True
-    return True  # falls field fehlt, nicht zu hart filtern
+    return True
 
 def find_ccxt_futures_symbol(exchange_id: str, base_sym: str):
-    """
-    Sucht in load_markets nach einem passenden USDT Perp/SWAP Markt für base_sym.
-    Gibt ccxt-symbol string zurück (pair_used).
-    """
     markets = load_markets_cached(exchange_id)
     candidates = []
     for sym, m in markets.items():
@@ -311,11 +285,9 @@ def find_ccxt_futures_symbol(exchange_id: str, base_sym: str):
         if not _is_usdt_linear_perp_market(m):
             continue
         candidates.append((sym, m))
-
     if not candidates:
         return None
 
-    # leichte Präferenz: wenn symbol etwas wie "BTC/USDT:USDT" hat, oft der "richtige" linear swap in ccxt
     def score(sym, m):
         s = 0
         if ":USDT" in sym:
@@ -332,20 +304,13 @@ def find_ccxt_futures_symbol(exchange_id: str, base_sym: str):
     return candidates[0][0]
 
 def fetch_ohlcv_ccxt(exchange_id: str, ccxt_symbol: str, timeframe: str, limit: int = 200):
-    """
-    Liefert normalisierte closed candles (letzte unvollständige Kerze entfernt).
-    """
     ex = get_exchange_client(exchange_id)
     ohlcv = ex.fetch_ohlcv(ccxt_symbol, timeframe=timeframe, limit=limit)
-
     if not ohlcv or len(ohlcv) < 15:
         return None
-
-    # Entferne letzte Candle (in-progress)
     ohlcv = ohlcv[:-1]
     if len(ohlcv) < 12:
         return None
-
     rows = []
     for ts, o, h, l, c, v in ohlcv:
         dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
@@ -361,63 +326,46 @@ def compute_nr_flags(closed):
     nr10 = [False] * n
     nr7 = [False] * n
     nr4 = [False] * n
-
     for i in range(n):
         w10 = rngs[max(0, i - 9): i + 1]
-        w7  = rngs[max(0, i - 6): i + 1]
-        w4  = rngs[max(0, i - 3): i + 1]
-
+        w7 = rngs[max(0, i - 6): i + 1]
+        w4 = rngs[max(0, i - 3): i + 1]
         lst10 = min(w10) if len(w10) >= 10 else None
-        lst7  = min(w7)  if len(w7)  >= 7  else None
-        lst4  = min(w4)  if len(w4)  >= 4  else None
-
+        lst7 = min(w7) if len(w7) >= 7 else None
+        lst4 = min(w4) if len(w4) >= 4 else None
         is10 = (lst10 is not None and rngs[i] == lst10)
-        is7  = (lst7 is not None and rngs[i] == lst7 and (not is10))
-        is4  = (lst4 is not None and rngs[i] == lst4 and (not is7) and (not is10))
-
+        is7 = (lst7 is not None and rngs[i] == lst7 and (not is10))
+        is4 = (lst4 is not None and rngs[i] == lst4 and (not is7) and (not is10))
         nr10[i] = is10
         nr7[i] = is7
         nr4[i] = is4
-
     return nr4, nr7, nr10
 
 def simulate_breakouts_since_last_nr(closed):
     if len(closed) < 12:
         return "", "", "-", "-", 0, 0, None, None
-
     nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(closed)
-
     setup_idx = -1
     setup_type = ""
     for i in range(len(closed) - 1, -1, -1):
         if nr10_flags[i] or nr7_flags[i] or nr4_flags[i]:
             setup_idx = i
-            if nr10_flags[i]:
-                setup_type = "NR10"
-            elif nr7_flags[i]:
-                setup_type = "NR7"
-            else:
-                setup_type = "NR4"
+            setup_type = "NR10" if nr10_flags[i] else ("NR7" if nr7_flags[i] else "NR4")
             break
-
     if setup_idx == -1:
         return "", "", "-", "-", 0, 0, None, None
-
     rh = closed[setup_idx]["high"]
     rl = closed[setup_idx]["low"]
     mid = (rh + rl) / 2.0
-
     up_check = True
     down_check = True
     up_count = 0
     down_count = 0
     breakout_state = "-"
     breakout_tag = "-"
-
     for j in range(setup_idx + 1, len(closed)):
         prev_close = closed[j - 1]["close"]
         cur_close = closed[j]["close"]
-
         if cur_close > mid and down_check is False:
             down_check = True
         if (prev_close >= rl) and (cur_close < rl) and down_check:
@@ -425,7 +373,6 @@ def simulate_breakouts_since_last_nr(closed):
             down_check = False
             breakout_state = "DOWN"
             breakout_tag = f"DOWN#{down_count}"
-
         if cur_close < mid and up_check is False:
             up_check = True
         if (prev_close <= rh) and (cur_close > rh) and up_check:
@@ -433,88 +380,116 @@ def simulate_breakouts_since_last_nr(closed):
             up_check = False
             breakout_state = "UP"
             breakout_tag = f"UP#{up_count}"
-
     setup_time = closed[setup_idx]["time"]
     return setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl
+
+# -----------------------------
+# Display helpers (compact/mobile)
+# -----------------------------
+def mk_pattern_badge(nr10: bool, nr7: bool, nr4: bool) -> str:
+    parts = []
+    if nr10: parts.append("🟣NR10")
+    if nr7:  parts.append("🟡NR7")
+    if nr4:  parts.append("🟢NR4")
+    return " ".join(parts) if parts else "—"
+
+def mk_breakout_badge(state: str, tag: str) -> str:
+    if state == "UP":
+        return f"🟢▲ {tag}"
+    if state == "DOWN":
+        return f"🔴▼ {tag}"
+    return "—"
+
+def mk_range_badge(in_range: bool) -> str:
+    return "✅ InRange" if in_range else "—"
+
+def short_ex(exchange_id: str) -> str:
+    if exchange_id == "coingecko": return "UTC"
+    return exchange_id.upper()
 
 # -----------------------------
 # App
 # -----------------------------
 def main():
     st.set_page_config(page_title="NR Scanner (Futures)", layout="wide")
-    st.title("NR4 / NR7 / NR10 Scanner (Futures via ccxt)")
+    st.title("NR Scanner (Futures)")
 
-    # Minimal UI: oben die Kern-Steuerung
-    left, right = st.columns([1, 1])
+    # Mobile-friendly minimal CSS (reduces padding + makes tables feel tighter)
+    st.markdown("""
+<style>
+.block-container { padding-top: 0.8rem; padding-bottom: 1.2rem; }
+div[data-testid="stHorizontalBlock"] { gap: 0.6rem; }
+div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
+</style>
+""", unsafe_allow_html=True)
 
-    with left:
+    # Top Controls (2 columns, works better on mobile too)
+    cA, cB = st.columns([1, 1])
+    with cA:
         universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top N"], index=0)
         tf = st.selectbox("Timeframe", ["1D", "4H", "1W"], index=0)
-
-    with right:
+    with cB:
         provider_mode = st.selectbox(
             "Futures Quelle",
             ["Auto (Bitget→BingX→Bybit→MEXC→BloFin→OKX)"] + [f"Nur {p.upper()}" for p in PROVIDER_CHAIN],
             index=0
         )
-        allow_utc_fallback = st.checkbox("UTC-Fallback aktivieren (CoinGecko)", value=False)
+        allow_utc_fallback = st.checkbox("UTC-Fallback (CoinGecko)", value=False)
 
-    # Erklärung wieder rein ✅
+    # Explanation (as requested)
     with st.expander("ℹ️ Unterschied: Exchange Close vs UTC"):
         st.markdown("""
 **Exchange Close (Futures / Börsen-Close)**  
 - Wir verwenden **Futures/SWAP-Kerzen** direkt von der gewählten Börse (Bitget/BingX/Bybit/MEXC/BloFin/OKX).  
-- Der Tages-Close ist der Close der **Börsen-Kerze** (je nach Exchange minimal unterschiedliche “Tagesgrenze”).  
-- ✅ Vorteil: passt zu deinem echten Futures-Trading (Order/Pricefeed der Börse).
+- Tages-Close = Close der **Börsen-Kerze** (je nach Börse kann die “Tagesgrenze” minimal abweichen).  
+- ✅ Vorteil: passt zu deinem Futures-Trading & Orderfeed.
 
 **UTC (letzte abgeschlossene Tageskerze)**  
 - Ein Tag läuft immer von **00:00 bis 23:59 UTC**.  
-- Wir nehmen die letzte **vollständig abgeschlossene** UTC-Tageskerze.  
-- ✅ Vorteil: einheitlich & vergleichbar  
-- ❌ Nachteil: langsamer (mehr API-Calls) und kann leicht vom Exchange-Close abweichen
+- Wir nutzen die letzte **vollständig abgeschlossene** UTC-Tageskerze.  
+- ✅ Vorteil: einheitlich/vergleichbar  
+- ❌ Nachteil: langsamer (mehr API-Requests) und kann leicht vom Exchange-Close abweichen.
         """)
 
-    # NR Auswahl
-    c1, c2, c3 = st.columns(3)
-    want_nr7 = c1.checkbox("NR7", value=True)
-    want_nr4 = c2.checkbox("NR4", value=False)
-    want_nr10 = c3.checkbox("NR10", value=False)
+    # Pattern checkboxes
+    p1, p2, p3 = st.columns(3)
+    want_nr7 = p1.checkbox("NR7", value=True)
+    want_nr4 = p2.checkbox("NR4", value=False)
+    want_nr10 = p3.checkbox("NR10", value=False)
 
     show_inrange_only = st.checkbox("Nur Coins anzeigen, die aktuell im NR-Range sind", value=False)
 
-    # Universe Einstellungen
+    # View mode: Compact default (mobile)
+    view_mode = st.radio("Ansicht", ["Kompakt (Mobile)", "Detail (Desktop)"], index=0, horizontal=True)
+
+    # Universe configs
     top_n = 150
     stable_toggle = False
     tickers_text = None
-
     cw_map = load_cw_id_map()
 
     if universe == "CoinGecko Top N":
         top_n = st.number_input("Top N", min_value=10, max_value=500, value=150, step=10)
         stable_toggle = st.checkbox("Stablecoins scannen", value=False)
-        # Hinweis: CoinGecko Key braucht man dann auf jeden Fall
         if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
-            st.warning("Für CoinGecko Top-N brauchst du COINGECKO_DEMO_API_KEY in Streamlit Secrets.")
+            st.info("Hinweis: Für CoinGecko Top-N brauchst du COINGECKO_DEMO_API_KEY in Streamlit Secrets.")
     else:
         tickers_text = st.text_area("Ticker (1 pro Zeile)", value=CW_DEFAULT_TICKERS, height=110)
 
-    # ccxt Check
     if not ccxt_available():
         st.error("ccxt ist nicht installiert. Bitte 'ccxt' in requirements.txt hinzufügen und neu deployen.")
         return
 
-    run = st.button("Scan")
+    run = st.button("Scan", use_container_width=True)
     if not run:
         return
     if not (want_nr7 or want_nr4 or want_nr10):
         st.warning("Bitte mindestens NR7/NR4/NR10 auswählen.")
         return
 
-    # Timeframe mapping (ccxt)
     tf_map = {"1D": "1d", "4H": "4h", "1W": "1w"}
     ccxt_tf = tf_map[tf]
 
-    # Provider Chain
     if provider_mode.startswith("Nur "):
         selected = provider_mode.replace("Nur ", "").strip().lower()
         provider_chain = [selected]
@@ -524,7 +499,6 @@ def main():
     # Build scan list
     scan_list = []
     if universe == "CoinGecko Top N":
-        # Wenn UTC-Fallback aus ist, brauchen wir CoinGecko trotzdem für "Top N" Universe.
         if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
             st.error("CoinGecko Top-N geht nur, wenn COINGECKO_DEMO_API_KEY gesetzt ist.")
             return
@@ -532,11 +506,7 @@ def main():
         if not stable_toggle:
             markets = [m for m in markets if not is_stablecoin_marketrow(m)]
         for m in markets:
-            scan_list.append({
-                "symbol": (m.get("symbol") or "").upper(),
-                "name": m.get("name") or "",
-                "coingecko_id": m.get("id") or ""
-            })
+            scan_list.append({"symbol": (m.get("symbol") or "").upper(), "name": m.get("name") or "", "coingecko_id": m.get("id") or ""})
     else:
         symbols = []
         for line in (tickers_text or "").splitlines():
@@ -544,16 +514,12 @@ def main():
             if s and s not in symbols:
                 symbols.append(s)
         for sym in symbols:
-            scan_list.append({
-                "symbol": sym,
-                "name": sym,
-                "coingecko_id": cw_map.get(sym, "")
-            })
+            scan_list.append({"symbol": sym, "name": sym, "coingecko_id": cw_map.get(sym, "")})
 
     results, skipped, errors = [], [], []
     progress = st.progress(0)
 
-    with st.spinner("Scanne Futures-Daten..."):
+    with st.spinner("Scanne... (Futures zuerst, optional UTC Fallback)"):
         for i, item in enumerate(scan_list, 1):
             base = item["symbol"]
             name = item.get("name", base)
@@ -563,38 +529,30 @@ def main():
             exchange_used = ""
             pair_used = ""
             data_source = ""
-
-            # 1) Futures via provider chain
             last_reason = None
+
+            # Futures chain
             for ex_id in provider_chain:
                 try:
-                    # BloFin: wenn ccxt es nicht hat -> skip
                     if not hasattr(ccxt, ex_id):
                         last_reason = f"{ex_id}: not supported by ccxt"
                         continue
-
-                    # markets laden (cached)
                     _ = load_markets_cached(ex_id)
-
                     sym = find_ccxt_futures_symbol(ex_id, base)
                     if not sym:
                         last_reason = f"{ex_id}: symbol not listed"
                         continue
-
                     rows = fetch_ohlcv_ccxt(ex_id, sym, timeframe=ccxt_tf, limit=200)
                     if not rows:
                         last_reason = f"{ex_id}: no data / too short"
                         continue
-
                     closed = rows
                     exchange_used = ex_id
                     pair_used = sym
                     data_source = "Futures"
                     break
-
                 except Exception as e:
                     msg = str(e)
-                    # typische Fälle: 451/403/timeouts/rate limit
                     if "451" in msg:
                         last_reason = f"{ex_id}: blocked (451)"
                     elif "429" in msg:
@@ -605,7 +563,7 @@ def main():
                         last_reason = f"{ex_id}: error"
                     continue
 
-            # 2) Optional UTC fallback (nur 1D sinnvoll)
+            # Optional UTC fallback (nur 1D)
             if (closed is None) and allow_utc_fallback and tf == "1D":
                 try:
                     if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
@@ -625,15 +583,11 @@ def main():
                     errors.append(f"{base}: UTC error - {type(e).__name__} - {str(e)[:160]}")
 
             if closed is None:
-                if last_reason:
-                    skipped.append(f"{base}: {last_reason}")
-                else:
-                    skipped.append(f"{base}: no data")
+                skipped.append(f"{base}: {last_reason or 'no data'}")
                 progress.progress(i / len(scan_list))
                 continue
 
             try:
-                # NR Flags (letzte abgeschlossene Kerze)
                 nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(closed)
                 last_nr10 = bool(nr10_flags[-1])
                 last_nr7 = bool(nr7_flags[-1])
@@ -677,7 +631,6 @@ def main():
                         "range_high": rh,
                         "coingecko_id": coin_id,
                     })
-
             except Exception as e:
                 errors.append(f"{base}: calc error - {type(e).__name__} - {str(e)[:160]}")
 
@@ -686,35 +639,84 @@ def main():
     df = pd.DataFrame(results)
     if df.empty:
         st.warning(f"Keine Treffer. Skipped: {len(skipped)} | Errors: {len(errors)}")
+        if skipped or errors:
+            with st.expander("Report"):
+                for s in skipped[:200]:
+                    st.write(s)
+                for e in errors[:200]:
+                    st.write(e)
+        return
+
+    # Sort
+    df = df.sort_values(
+        ["in_nr_range_now","NR10","NR7","NR4","symbol"],
+        ascending=[False, False, False, False, True]
+    ).reset_index(drop=True)
+
+    # Build display columns
+    df_disp = df.copy()
+    df_disp["pattern"] = df_disp.apply(lambda r: mk_pattern_badge(bool(r["NR10"]), bool(r["NR7"]), bool(r["NR4"])), axis=1)
+    df_disp["breakout"] = df_disp.apply(lambda r: mk_breakout_badge(str(r["breakout_state"]), str(r["breakout_tag"])), axis=1)
+    df_disp["range_now"] = df_disp["in_nr_range_now"].apply(lambda x: mk_range_badge(bool(x)))
+    df_disp["ex"] = df_disp["exchange_used"].apply(short_ex)
+
+    st.write(f"Treffer: {len(df_disp)} | Skipped: {len(skipped)} | Errors: {len(errors)}")
+
+    if view_mode == "Kompakt (Mobile)":
+        # Mobile: wenige Spalten, keine breiten Werte
+        compact = df_disp[["symbol","pattern","range_now","breakout","ex"]].copy()
+        compact.rename(columns={"symbol":"Coin","pattern":"Pattern","range_now":"Range","breakout":"Breakout","ex":"Ex"}, inplace=True)
+        st.dataframe(compact, use_container_width=True, hide_index=True)
+
+        with st.expander("Details zu Treffern"):
+            # Details per Coin als “Cards”
+            for _, r in df_disp.iterrows():
+                title = f"{r['symbol']} — {r['name']}"
+                with st.expander(title):
+                    st.write(f"**Provider:** {r['exchange_used']}  |  **Pair:** {r['pair_used']}  |  **Quelle:** {r['data_source']}")
+                    st.write(f"**Pattern:** {mk_pattern_badge(bool(r['NR10']), bool(r['NR7']), bool(r['NR4']))}")
+                    st.write(f"**In Range:** {bool(r['in_nr_range_now'])}")
+                    st.write(f"**Breakout:** {mk_breakout_badge(str(r['breakout_state']), str(r['breakout_tag']))}  (UP={int(r.get('breakout_tag','-').startswith('UP'))})")
+                    st.write(f"**NR Setup:** {r['nr_setup_type']} @ {r['nr_setup_time']}")
+                    st.write(f"**Last Close:** {r['last_close']}")
+                    st.write(f"**Range Low/High:** {r['range_low']} / {r['range_high']}")
+                    if r.get("coingecko_id"):
+                        st.caption(f"coingecko_id: {r['coingecko_id']}")
+
     else:
-        # Reihenfolge übersichtlich halten
-        df = df[[
-            "symbol","name",
-            "NR10","NR7","NR4",
-            "in_nr_range_now",
-            "breakout_state","breakout_tag",
-            "nr_setup_type","nr_setup_time",
-            "exchange_used","pair_used","data_source",
-            "last_close","range_low","range_high",
-            "coingecko_id"
-        ]]
+        # Desktop: mehr Infos, aber immer noch übersichtlich
+        detail = df_disp[[
+            "symbol","name","pattern","range_now","breakout",
+            "nr_setup_type","nr_setup_time","ex","data_source"
+        ]].copy()
+        detail.rename(columns={
+            "symbol":"Coin","name":"Name","pattern":"Pattern","range_now":"Range",
+            "breakout":"Breakout","nr_setup_type":"Setup","nr_setup_time":"Setup Time",
+            "ex":"Exchange","data_source":"Source"
+        }, inplace=True)
+        st.dataframe(detail, use_container_width=True, hide_index=True)
 
-        # Sort: erst "im Range", dann Pattern, dann Symbol
-        df = df.sort_values(
-            ["in_nr_range_now","NR10","NR7","NR4","symbol"],
-            ascending=[False, False, False, False, True]
-        ).reset_index(drop=True)
+        with st.expander("Technische Details (Pair/Range/Close)"):
+            tech = df_disp[[
+                "symbol","exchange_used","pair_used","data_source","last_close","range_low","range_high","coingecko_id"
+            ]].copy()
+            tech.rename(columns={
+                "symbol":"Coin","exchange_used":"exchange_used","pair_used":"pair_used",
+                "data_source":"data_source","last_close":"last_close",
+                "range_low":"range_low","range_high":"range_high","coingecko_id":"coingecko_id"
+            }, inplace=True)
+            st.dataframe(tech, use_container_width=True, hide_index=True)
 
-        st.write(f"Treffer: {len(df)} | Skipped: {len(skipped)} | Errors: {len(errors)}")
-        st.dataframe(df, use_container_width=True)
+    # CSV
+    st.download_button(
+        "CSV Export (voll)",
+        df.to_csv(index=False).encode("utf-8"),
+        file_name=f"nr_scan_{tf}.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
 
-        st.download_button(
-            "CSV",
-            df.to_csv(index=False).encode("utf-8"),
-            file_name=f"nr_scan_{tf}.csv",
-            mime="text/csv"
-        )
-
+    # Dezent Report
     if skipped or errors:
         with st.expander("Report (nicht gescannt / Fehler)"):
             if skipped:
