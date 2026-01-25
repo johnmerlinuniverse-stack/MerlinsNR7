@@ -553,7 +553,7 @@ def short_ex(exchange_id: str) -> str:
 # App
 # -----------------------------
 def main():
-    st.set_page_config(page_title="NR Scanner (Futures)", layout="wide")
+    st.set_page_config(page_title="Merlins NR Scanner (Futures)", layout="wide")
 
     if "theme_mode" not in st.session_state:
         st.session_state["theme_mode"] = "dark"
@@ -563,7 +563,7 @@ def main():
 
     header_left, header_right = st.columns([3, 1], vertical_alignment="center")
     with header_left:
-        st.markdown('<div class="nr-card"><div class="nr-card-title">NR Scanner (Futures)</div><div class="nr-card-sub">Futures-Kerzen via ccxt · Auto-Fallback: Bitget → BingX → Bybit → MEXC → BloFin → OKX</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="nr-card"><div class="nr-card-title">Merlins NR Scanner (Futures)</div><div class="nr-card-sub">Futures-Kerzen via ccxt · Auto-Fallback: Bitget → BingX → Bybit → MEXC → BloFin → OKX</div></div>', unsafe_allow_html=True)
     with header_right:
         theme_label = "🌙 Dark" if st.session_state["theme_mode"] == "dark" else "☀️ Light"
         if st.button(f"Theme: {theme_label}", use_container_width=True):
