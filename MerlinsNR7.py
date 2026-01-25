@@ -169,7 +169,7 @@ html, body, [data-testid="stAppViewContainer"] {{
   color: var(--text) !important;
 }}
 .block-container {{
-  padding-top: 2.4rem; /* mehr Abstand nach oben */
+  padding-top: 2.9rem; /* mehr Abstand nach oben */
   padding-bottom: 1.2rem;
   max-width: 1100px;
 }}
