@@ -461,10 +461,10 @@ def compute_nr_flags(closed):
 def simulate_breakouts_since_last_nr(closed):
     """
     Returns:
-    setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, last_breakout_index
+    setup_time, setup_type, breakout_state, breakout_tag, event_count, rh, rl, last_break_idx, prev_breakout_tag = simulate_breakouts_since_last_nr(closed)
     """
     if len(closed) < 12:
-        return "", "", "-", "-", 0, 0, None, None, None
+        return "", "", "-", "-", 0, None, None, None, "-"
 
     nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(closed)
 
@@ -477,46 +477,56 @@ def simulate_breakouts_since_last_nr(closed):
             break
 
     if setup_idx == -1:
-        return "", "", "-", "-", 0, 0, None, None, None
+        return "", "", "-", "-", 0, None, None, None, "-"
 
     rh = closed[setup_idx]["high"]
     rl = closed[setup_idx]["low"]
     mid = (rh + rl) / 2.0
 
+    # LuxAlgo gating
     up_check = True
     down_check = True
-    up_count = 0
-    down_count = 0
+
+    # NEW: overall breakout counter
+    event_count = 0
     breakout_state = "-"
     breakout_tag = "-"
+    prev_breakout_tag = "-"
     last_breakout_index = None
 
     for j in range(setup_idx + 1, len(closed)):
         prev_close = closed[j - 1]["close"]
         cur_close = closed[j]["close"]
 
-        # Down breakout gating (LuxAlgo style)
+        # reset down gating if price goes above mid
         if cur_close > mid and down_check is False:
             down_check = True
+
+        # DOWN breakout
         if (prev_close >= rl) and (cur_close < rl) and down_check:
-            down_count += 1
+            event_count += 1
             down_check = False
             breakout_state = "DOWN"
-            breakout_tag = f"DOWN#{down_count}"
+            prev_breakout_tag = breakout_tag
+            breakout_tag = f"DOWN#{event_count}"
             last_breakout_index = j
 
-        # Up breakout gating (LuxAlgo style)
+        # reset up gating if price goes below mid
         if cur_close < mid and up_check is False:
             up_check = True
+
+        # UP breakout
         if (prev_close <= rh) and (cur_close > rh) and up_check:
-            up_count += 1
+            event_count += 1
             up_check = False
             breakout_state = "UP"
-            breakout_tag = f"UP#{up_count}"
+            prev_breakout_tag = breakout_tag
+            breakout_tag = f"UP#{event_count}"
             last_breakout_index = j
 
     setup_time = closed[setup_idx]["time"]
-    return setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, last_breakout_index
+    return setup_time, setup_type, breakout_state, breakout_tag, event_count, rh, rl, last_breakout_index, prev_breakout_tag
+
 
 # -----------------------------
 # Display helpers
@@ -528,12 +538,14 @@ def mk_pattern_badge(nr10: bool, nr7: bool, nr4: bool) -> str:
     if nr4:  parts.append("🟢 NR4")
     return " ".join(parts) if parts else "—"
 
-def mk_breakout_badge(state: str, tag: str) -> str:
-    if state == "UP":
-        return f"🟢 ▲ {tag}"
-    if state == "DOWN":
-        return f"🔴 ▼ {tag}"
-    return "—"
+def mk_breakout_badge(state: str, tag: str, prev_tag: str) -> str:
+    if tag in ["-", "—", None] or state in ["-", "—", None]:
+        return "—"
+    prefix = "🟢 ▲" if state == "UP" else "🔴 ▼"
+    if prev_tag and prev_tag not in ["-", "—"]:
+        return f"{prefix} {tag} (prev {prev_tag})"
+    return f"{prefix} {tag}"
+
 
 def mk_state_badge(state: str) -> str:
     if state == "Above":
@@ -799,6 +811,8 @@ def main():
                         "range_low": rl,
                         "range_high": rh,
                         "coingecko_id": coin_id,
+                        "prev_breakout_tag": prev_breakout_tag,
+                        "breakout_events": event_count,
                     })
             except Exception as e:
                 errors.append(f"{base}: calc error - {type(e).__name__} - {str(e)[:160]}")
@@ -820,7 +834,7 @@ def main():
 
     df_disp = df.copy()
     df_disp["Pattern"] = df_disp.apply(lambda r: mk_pattern_badge(bool(r["NR10"]), bool(r["NR7"]), bool(r["NR4"])), axis=1)
-    df_disp["Breakout"] = df_disp.apply(lambda r: mk_breakout_badge(str(r["breakout_state"]), str(r["breakout_tag"])), axis=1)
+    df_disp["Breakout"] = df_disp.apply(lambda r: mk_breakout_badge(str(r["breakout_state"]), str(r["breakout_tag"]), str(r.get("prev_breakout_tag","-"))), axis=1)
     df_disp["BarsSince"] = df_disp["bars_since_breakout"]
     df_disp["State"] = df_disp["price_state"].apply(lambda s: mk_state_badge(str(s)))
     df_disp["Ex"] = df_disp["exchange_used"].apply(short_ex)
