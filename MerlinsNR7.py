@@ -169,7 +169,7 @@ html, body, [data-testid="stAppViewContainer"] {{
   color: var(--text) !important;
 }}
 .block-container {{
-  padding-top: 2.4rem; /* mehr Abstand nach oben */
+  padding-top: 2.4rem;
   padding-bottom: 1.2rem;
   max-width: 1100px;
 }}
@@ -349,9 +349,6 @@ def load_cw_id_map():
 # -----------------------------
 PROVIDER_CHAIN = ["bitget", "bingx", "bybit", "mexc", "blofin", "okx"]
 
-def ccxt_available():
-    return ccxt is not None
-
 def _make_exchange(exchange_id: str):
     klass = getattr(ccxt, exchange_id)
     ex = klass({"enableRateLimit": True, "timeout": 20000})
@@ -363,7 +360,7 @@ def _make_exchange(exchange_id: str):
 
 @st.cache_resource(ttl=3600)
 def get_exchange_client(exchange_id: str):
-    if not ccxt_available():
+    if ccxt is None:
         raise RuntimeError("ccxt ist nicht installiert. Bitte 'ccxt' in requirements.txt hinzufügen.")
     if not hasattr(ccxt, exchange_id):
         raise RuntimeError(f"ccxt unterstützt Exchange '{exchange_id}' nicht in dieser Version.")
@@ -435,7 +432,7 @@ def fetch_ohlcv_ccxt(exchange_id: str, ccxt_symbol: str, timeframe: str, limit: 
     return rows
 
 # -----------------------------
-# NR + Breakout logic (LuxAlgo-style) + NR10
+# NR logic (NR4/NR7/NR10) like LuxAlgo
 # -----------------------------
 def compute_nr_flags(closed):
     n = len(closed)
@@ -460,8 +457,9 @@ def compute_nr_flags(closed):
 
 def simulate_breakouts_since_last_nr(closed):
     """
+    LuxAlgo-style breakout gating + OVERALL event count (Signal 1/2/3...).
     Returns:
-    setup_time, setup_type, breakout_state, breakout_tag, event_count, rh, rl, last_break_idx, prev_breakout_tag = simulate_breakouts_since_last_nr(closed)
+    setup_time, setup_type, breakout_state, breakout_tag, event_count, rh, rl, last_breakout_index, prev_breakout_tag
     """
     if len(closed) < 12:
         return "", "", "-", "-", 0, None, None, None, "-"
@@ -483,11 +481,9 @@ def simulate_breakouts_since_last_nr(closed):
     rl = closed[setup_idx]["low"]
     mid = (rh + rl) / 2.0
 
-    # LuxAlgo gating
     up_check = True
     down_check = True
 
-    # NEW: overall breakout counter
     event_count = 0
     breakout_state = "-"
     breakout_tag = "-"
@@ -498,7 +494,7 @@ def simulate_breakouts_since_last_nr(closed):
         prev_close = closed[j - 1]["close"]
         cur_close = closed[j]["close"]
 
-        # reset down gating if price goes above mid
+        # reset down gating
         if cur_close > mid and down_check is False:
             down_check = True
 
@@ -511,7 +507,7 @@ def simulate_breakouts_since_last_nr(closed):
             breakout_tag = f"DOWN#{event_count}"
             last_breakout_index = j
 
-        # reset up gating if price goes below mid
+        # reset up gating
         if cur_close < mid and up_check is False:
             up_check = True
 
@@ -527,7 +523,6 @@ def simulate_breakouts_since_last_nr(closed):
     setup_time = closed[setup_idx]["time"]
     return setup_time, setup_type, breakout_state, breakout_tag, event_count, rh, rl, last_breakout_index, prev_breakout_tag
 
-
 # -----------------------------
 # Display helpers
 # -----------------------------
@@ -538,14 +533,12 @@ def mk_pattern_badge(nr10: bool, nr7: bool, nr4: bool) -> str:
     if nr4:  parts.append("🟢 NR4")
     return " ".join(parts) if parts else "—"
 
-def mk_breakout_badge(state: str, tag: str, prev_tag: str) -> str:
-    if tag in ["-", "—", None] or state in ["-", "—", None]:
-        return "—"
-    prefix = "🟢 ▲" if state == "UP" else "🔴 ▼"
-    if prev_tag and prev_tag not in ["-", "—"]:
-        return f"{prefix} {tag} (prev {prev_tag})"
-    return f"{prefix} {tag}"
-
+def mk_breakout_badge(state: str, tag: str) -> str:
+    if state == "UP":
+        return f"🟢 ▲ {tag}"
+    if state == "DOWN":
+        return f"🔴 ▼ {tag}"
+    return "—"
 
 def mk_state_badge(state: str) -> str:
     if state == "Above":
@@ -570,12 +563,16 @@ def main():
     if "theme_mode" not in st.session_state:
         st.session_state["theme_mode"] = "dark"
 
-    # Spacer (falls mobile header zu knapp ist)
+    # Extra spacer so header never gets clipped
     st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
 
     header_left, header_right = st.columns([3, 1], vertical_alignment="center")
     with header_left:
-        st.markdown('<div class="nr-card"><div class="nr-card-title">NR Scanner (Futures)</div><div class="nr-card-sub">Futures-Kerzen via ccxt · Auto-Fallback: Bitget → BingX → Bybit → MEXC → BloFin → OKX</div></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="nr-card"><div class="nr-card-title">NR Scanner (Futures)</div>'
+            '<div class="nr-card-sub">Futures-Kerzen via ccxt · Auto-Fallback: Bitget → BingX → Bybit → MEXC → BloFin → OKX</div></div>',
+            unsafe_allow_html=True
+        )
     with header_right:
         theme_label = "🌙 Dark" if st.session_state["theme_mode"] == "dark" else "☀️ Light"
         if st.button(f"Theme: {theme_label}", use_container_width=True):
@@ -584,6 +581,7 @@ def main():
 
     inject_theme_css(st.session_state["theme_mode"])
 
+    # Controls
     st.markdown('<div class="nr-card">', unsafe_allow_html=True)
     cA, cB = st.columns([1, 1])
     with cA:
@@ -602,7 +600,7 @@ def main():
 **Exchange Close (Futures / Börsen-Close)**  
 - Wir nutzen Futures/SWAP-Kerzen direkt von der Börse.  
 - Tages-Close = Close der Börsen-Kerze (Tagesgrenze kann leicht abweichen).  
-- ✅ Vorteil: passt zum Futures-Feed der Börse.
+- ✅ Vorteil: passt zum Futures-Feed.
 
 **UTC (letzte abgeschlossene Tageskerze)**  
 - 00:00–23:59 UTC, letzte vollständig abgeschlossene Tageskerze.  
@@ -659,6 +657,7 @@ def main():
     else:
         provider_chain = PROVIDER_CHAIN[:]
 
+    # Build scan list
     scan_list = []
     if universe == "CoinGecko Top N":
         if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
@@ -693,6 +692,7 @@ def main():
             data_source = ""
             last_reason = None
 
+            # Futures chain
             for ex_id in provider_chain:
                 try:
                     if not hasattr(ccxt, ex_id):
@@ -728,6 +728,7 @@ def main():
                         last_reason = f"{ex_id}: error"
                     continue
 
+            # Optional UTC fallback (only meaningful on 1D)
             if (closed is None) and allow_utc_fallback and tf == "1D":
                 try:
                     if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
@@ -761,10 +762,10 @@ def main():
                 nr7 = want_nr7 and last_nr7
                 nr4 = want_nr4 and last_nr4
 
-                setup_time, setup_type, breakout_state, breakout_tag, up_count, down_count, rh, rl, last_break_idx = simulate_breakouts_since_last_nr(closed)
+                setup_time, setup_type, breakout_state, breakout_tag, event_count, rh, rl, last_break_idx, prev_breakout_tag = simulate_breakouts_since_last_nr(closed)
                 last_close = float(closed[-1]["close"])
 
-                # State (Above/Below/Inside)
+                # State (Above/Below/Inside) + inRange
                 price_state = "—"
                 in_nr_range = False
                 if rh is not None and rl is not None:
@@ -789,6 +790,7 @@ def main():
                     progress.progress(i / len(scan_list))
                     continue
 
+                # show rows if pattern matches OR inrange_only is enabled and it's inside
                 show_row = (nr10 or nr7 or nr4) or (show_inrange_only and in_nr_range)
                 if show_row:
                     results.append({
@@ -802,6 +804,7 @@ def main():
                         "bars_since_breakout": bars_since,
                         "breakout_state": breakout_state,
                         "breakout_tag": breakout_tag,
+                        "breakout_events": event_count,
                         "nr_setup_type": setup_type,
                         "nr_setup_time": setup_time,
                         "exchange_used": exchange_used,
@@ -811,8 +814,6 @@ def main():
                         "range_low": rl,
                         "range_high": rh,
                         "coingecko_id": coin_id,
-                        "prev_breakout_tag": prev_breakout_tag,
-                        "breakout_events": event_count,
                     })
             except Exception as e:
                 errors.append(f"{base}: calc error - {type(e).__name__} - {str(e)[:160]}")
@@ -830,11 +831,13 @@ def main():
                     st.write(e)
         return
 
-    df = df.sort_values(["in_nr_range_now","NR10","NR7","NR4","symbol"], ascending=[False, False, False, False, True]).reset_index(drop=True)
+    # Sorting: first those in range, then NR10, NR7, NR4
+    df = df.sort_values(["in_nr_range_now", "NR10", "NR7", "NR4", "symbol"], ascending=[False, False, False, False, True]).reset_index(drop=True)
 
+    # Display fields
     df_disp = df.copy()
     df_disp["Pattern"] = df_disp.apply(lambda r: mk_pattern_badge(bool(r["NR10"]), bool(r["NR7"]), bool(r["NR4"])), axis=1)
-    df_disp["Breakout"] = df_disp.apply(lambda r: mk_breakout_badge(str(r["breakout_state"]), str(r["breakout_tag"]), str(r.get("prev_breakout_tag","-"))), axis=1)
+    df_disp["Breakout"] = df_disp.apply(lambda r: mk_breakout_badge(str(r["breakout_state"]), str(r["breakout_tag"])), axis=1)
     df_disp["BarsSince"] = df_disp["bars_since_breakout"]
     df_disp["State"] = df_disp["price_state"].apply(lambda s: mk_state_badge(str(s)))
     df_disp["Ex"] = df_disp["exchange_used"].apply(short_ex)
@@ -849,9 +852,8 @@ def main():
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
     if view_mode == "Kompakt (Mobile)":
-        # Mobile: kompakt & nicht zu breit
-        compact = df_disp[["symbol","Pattern","State","Breakout","BarsSince","Ex"]].copy()
-        compact.rename(columns={"symbol":"Coin"}, inplace=True)
+        compact = df_disp[["symbol", "Pattern", "State", "Breakout", "BarsSince", "Ex"]].copy()
+        compact.rename(columns={"symbol": "Coin"}, inplace=True)
         st.dataframe(compact, use_container_width=True, hide_index=True)
 
         with st.expander("Details zu Treffern"):
@@ -860,21 +862,20 @@ def main():
                     st.write(f"**Provider:** {r['exchange_used']}  |  **Pair:** {r['pair_used']}  |  **Quelle:** {r['data_source']}")
                     st.write(f"**Pattern:** {r['Pattern']}")
                     st.write(f"**State:** {r['State']}  |  **BarsSince:** {r['BarsSince']}")
-                    st.write(f"**Breakout:** {r['Breakout']}")
+                    st.write(f"**Breakout:** {r['Breakout']}  |  **Total events:** {r.get('breakout_events', 0)}")
                     st.write(f"**NR Setup:** {r['nr_setup_type']} @ {r['nr_setup_time']}")
                     st.write(f"**Last Close:** {r['last_close']}")
                     st.write(f"**Range Low/High:** {r['range_low']} / {r['range_high']}")
                     if r.get("coingecko_id"):
                         st.caption(f"coingecko_id: {r['coingecko_id']}")
-
     else:
-        detail = df_disp[["symbol","name","Pattern","State","Breakout","BarsSince","nr_setup_type","nr_setup_time","Ex","data_source"]].copy()
-        detail.rename(columns={"symbol":"Coin","name":"Name","nr_setup_type":"Setup","nr_setup_time":"Setup Time","data_source":"Source"}, inplace=True)
+        detail = df_disp[["symbol", "name", "Pattern", "State", "Breakout", "BarsSince", "nr_setup_type", "nr_setup_time", "Ex", "data_source"]].copy()
+        detail.rename(columns={"symbol": "Coin", "name": "Name", "nr_setup_type": "Setup", "nr_setup_time": "Setup Time", "data_source": "Source"}, inplace=True)
         st.dataframe(detail, use_container_width=True, hide_index=True)
 
         with st.expander("Technische Details (Pair/Range/Close)"):
-            tech = df_disp[["symbol","exchange_used","pair_used","data_source","last_close","range_low","range_high","coingecko_id"]].copy()
-            tech.rename(columns={"symbol":"Coin"}, inplace=True)
+            tech = df_disp[["symbol", "exchange_used", "pair_used", "data_source", "last_close", "range_low", "range_high", "coingecko_id"]].copy()
+            tech.rename(columns={"symbol": "Coin"}, inplace=True)
             st.dataframe(tech, use_container_width=True, hide_index=True)
 
     st.download_button(
