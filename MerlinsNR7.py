@@ -229,9 +229,6 @@ div[data-testid="stDataFrame"] {{
   border: 1px solid var(--border);
   background: var(--tablebg) !important;
 }}
-div[data-testid="stHorizontalBlock"] {{
-  gap: 0.7rem;
-}}
 details {{
   border-radius: 14px;
   border: 1px solid var(--border);
@@ -244,6 +241,32 @@ summary {{
 }}
 </style>
 """, unsafe_allow_html=True)
+
+# -----------------------------
+# Timeframe helpers
+# -----------------------------
+TF_CCXT = {
+    "1m": "1m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1h",
+    "4h": "4h",
+    "1d": "1d",
+    "1w": "1w",
+}
+
+def timeframe_to_ms(tf: str) -> int:
+    tf = tf.lower()
+    if tf.endswith("m"):
+        return int(tf[:-1]) * 60_000
+    if tf.endswith("h"):
+        return int(tf[:-1]) * 60 * 60_000
+    if tf.endswith("d"):
+        return int(tf[:-1]) * 24 * 60 * 60_000
+    if tf.endswith("w"):
+        return int(tf[:-1]) * 7 * 24 * 60 * 60_000
+    return 0
 
 # -----------------------------
 # CoinGecko helpers (only used when needed)
@@ -334,7 +357,15 @@ def cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30):
     keys = sorted(k for k in day.keys() if k != today_utc)
     rows = []
     for k in keys:
-        rows.append({"time": k, "high": float(day[k]["high"]), "low": float(day[k]["low"]), "close": float(day[k]["close"]), "range": float(day[k]["high"] - day[k]["low"])})
+        # NOTE: we don't have exact open-ts, but for daily UTC it's ok
+        rows.append({
+            "ts_ms": int(datetime.fromisoformat(k).replace(tzinfo=timezone.utc).timestamp() * 1000),
+            "time": k,
+            "high": float(day[k]["high"]),
+            "low": float(day[k]["low"]),
+            "close": float(day[k]["close"]),
+            "range": float(day[k]["high"] - day[k]["low"]),
+        })
     return rows
 
 def load_cw_id_map():
@@ -353,8 +384,7 @@ def _make_exchange(exchange_id: str):
     klass = getattr(ccxt, exchange_id)
     ex = klass({"enableRateLimit": True, "timeout": 20000})
     opt = ex.options if hasattr(ex, "options") and isinstance(ex.options, dict) else {}
-    if exchange_id in ["bybit", "okx", "bitget", "bingx", "mexc", "blofin"]:
-        opt = {**opt, "defaultType": "swap"}
+    opt = {**opt, "defaultType": "swap"}  # futures/swap by default
     ex.options = opt
     return ex
 
@@ -406,8 +436,6 @@ def find_ccxt_futures_symbol(exchange_id: str, base_sym: str):
         s = 0
         if ":USDT" in sym:
             s += 3
-        if "SWAP" in sym.upper():
-            s += 1
         if m.get("swap"):
             s += 2
         if m.get("linear"):
@@ -417,22 +445,32 @@ def find_ccxt_futures_symbol(exchange_id: str, base_sym: str):
     candidates.sort(key=lambda x: score(x[0], x[1]), reverse=True)
     return candidates[0][0]
 
-def fetch_ohlcv_ccxt(exchange_id: str, ccxt_symbol: str, timeframe: str, limit: int = 200):
+def fetch_ohlcv_ccxt(exchange_id: str, ccxt_symbol: str, timeframe: str, limit: int = 300, since_ms: int | None = None):
     ex = get_exchange_client(exchange_id)
-    ohlcv = ex.fetch_ohlcv(ccxt_symbol, timeframe=timeframe, limit=limit)
+    ohlcv = ex.fetch_ohlcv(ccxt_symbol, timeframe=timeframe, limit=limit, since=since_ms)
     if not ohlcv or len(ohlcv) < 15:
         return None
-    ohlcv = ohlcv[:-1]  # remove in-progress candle
+
+    # remove in-progress candle
+    ohlcv = ohlcv[:-1]
     if len(ohlcv) < 12:
         return None
+
     rows = []
     for ts, o, h, l, c, v in ohlcv:
         dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
-        rows.append({"time": dt, "high": float(h), "low": float(l), "close": float(c), "range": float(h - l)})
+        rows.append({
+            "ts_ms": int(ts),
+            "time": dt,
+            "high": float(h),
+            "low": float(l),
+            "close": float(c),
+            "range": float(h - l),
+        })
     return rows
 
 # -----------------------------
-# NR logic (NR4/NR7/NR10) like LuxAlgo
+# NR logic (NR4/NR7/NR10)
 # -----------------------------
 def compute_nr_flags(closed):
     n = len(closed)
@@ -447,6 +485,7 @@ def compute_nr_flags(closed):
         lst10 = min(w10) if len(w10) >= 10 else None
         lst7 = min(w7) if len(w7) >= 7 else None
         lst4 = min(w4) if len(w4) >= 4 else None
+
         is10 = (lst10 is not None and rngs[i] == lst10)
         is7 = (lst7 is not None and rngs[i] == lst7 and (not is10))
         is4 = (lst4 is not None and rngs[i] == lst4 and (not is7) and (not is10))
@@ -455,73 +494,104 @@ def compute_nr_flags(closed):
         nr4[i] = is4
     return nr4, nr7, nr10
 
-def simulate_breakouts_since_last_nr(closed):
+def find_last_nr_setup(pattern_bars):
     """
-    LuxAlgo-style breakout gating + OVERALL event count (Signal 1/2/3...).
-    Returns:
-    setup_time, setup_type, breakout_state, breakout_tag, event_count, rh, rl, last_breakout_index, prev_breakout_tag
-    """
-    if len(closed) < 12:
-        return "", "", "-", "-", 0, None, None, None, "-"
+    Finds last NR bar in pattern timeframe and returns setup info.
 
-    nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(closed)
+    We treat that pattern bar as the "range source" (rh/rl),
+    and breakouts start AFTER that bar closes.
+    """
+    if len(pattern_bars) < 12:
+        return None
+
+    nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(pattern_bars)
 
     setup_idx = -1
     setup_type = ""
-    for i in range(len(closed) - 1, -1, -1):
+    for i in range(len(pattern_bars) - 1, -1, -1):
         if nr10_flags[i] or nr7_flags[i] or nr4_flags[i]:
             setup_idx = i
             setup_type = "NR10" if nr10_flags[i] else ("NR7" if nr7_flags[i] else "NR4")
             break
 
     if setup_idx == -1:
-        return "", "", "-", "-", 0, None, None, None, "-"
+        return None
 
-    rh = closed[setup_idx]["high"]
-    rl = closed[setup_idx]["low"]
+    bar = pattern_bars[setup_idx]
+    rh = float(bar["high"])
+    rl = float(bar["low"])
     mid = (rh + rl) / 2.0
+    setup_ts = int(bar["ts_ms"])
+    setup_time = str(bar["time"])
+    return {
+        "setup_idx": setup_idx,
+        "setup_type": setup_type,
+        "rh": rh,
+        "rl": rl,
+        "mid": mid,
+        "setup_ts": setup_ts,
+        "setup_time": setup_time,
+        "nr4": bool(nr4_flags[setup_idx]),
+        "nr7": bool(nr7_flags[setup_idx]),
+        "nr10": bool(nr10_flags[setup_idx]),
+    }
 
+def simulate_breakouts_on_signal(signal_bars, rh, rl):
+    """
+    LuxAlgo-style gating on SIGNAL timeframe bars.
+    OVERALL event_count = 1/2/3... regardless of direction.
+    """
+    if not signal_bars or len(signal_bars) < 3:
+        return {
+            "breakout_state": "-",
+            "breakout_tag": "-",
+            "event_count": 0,
+            "last_break_idx": None,
+        }
+
+    mid = (rh + rl) / 2.0
     up_check = True
     down_check = True
 
     event_count = 0
     breakout_state = "-"
     breakout_tag = "-"
-    prev_breakout_tag = "-"
-    last_breakout_index = None
+    last_break_idx = None
 
-    for j in range(setup_idx + 1, len(closed)):
-        prev_close = closed[j - 1]["close"]
-        cur_close = closed[j]["close"]
+    for j in range(1, len(signal_bars)):
+        prev_close = float(signal_bars[j - 1]["close"])
+        cur_close = float(signal_bars[j]["close"])
 
         # reset down gating
         if cur_close > mid and down_check is False:
             down_check = True
 
-        # DOWN breakout
+        # DOWN breakout (crossunder close below rl)
         if (prev_close >= rl) and (cur_close < rl) and down_check:
             event_count += 1
             down_check = False
             breakout_state = "DOWN"
-            prev_breakout_tag = breakout_tag
             breakout_tag = f"DOWN#{event_count}"
-            last_breakout_index = j
+            last_break_idx = j
 
         # reset up gating
         if cur_close < mid and up_check is False:
             up_check = True
 
-        # UP breakout
+        # UP breakout (crossover close above rh)
         if (prev_close <= rh) and (cur_close > rh) and up_check:
             event_count += 1
             up_check = False
             breakout_state = "UP"
-            prev_breakout_tag = breakout_tag
             breakout_tag = f"UP#{event_count}"
-            last_breakout_index = j
+            last_break_idx = j
 
-    setup_time = closed[setup_idx]["time"]
-    return setup_time, setup_type, breakout_state, breakout_tag, event_count, rh, rl, last_breakout_index, prev_breakout_tag
+    return {
+        "breakout_state": breakout_state,
+        "breakout_tag": breakout_tag,
+        "event_count": event_count,
+        "last_break_idx": last_break_idx,
+    }
 
 # -----------------------------
 # Display helpers
@@ -563,14 +633,13 @@ def main():
     if "theme_mode" not in st.session_state:
         st.session_state["theme_mode"] = "dark"
 
-    # Extra spacer so header never gets clipped
     st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
 
     header_left, header_right = st.columns([3, 1], vertical_alignment="center")
     with header_left:
         st.markdown(
             '<div class="nr-card"><div class="nr-card-title">NR Scanner (Futures)</div>'
-            '<div class="nr-card-sub">Futures-Kerzen via ccxt · Auto-Fallback: Bitget → BingX → Bybit → MEXC → BloFin → OKX</div></div>',
+            '<div class="nr-card-sub">NR-Pattern auf Pattern-TF · Breakouts auf Signal-TF (wie im Chart)</div></div>',
             unsafe_allow_html=True
         )
     with header_right:
@@ -581,31 +650,44 @@ def main():
 
     inject_theme_css(st.session_state["theme_mode"])
 
+    if ccxt is None:
+        st.error("ccxt ist nicht installiert. Bitte 'ccxt' in requirements.txt hinzufügen und neu deployen.")
+        return
+
+    cw_map = load_cw_id_map()
+
+    # -----------------------------
     # Controls
+    # -----------------------------
     st.markdown('<div class="nr-card">', unsafe_allow_html=True)
-    cA, cB = st.columns([1, 1])
+
+    cA, cB, cC = st.columns([1.1, 1.1, 1.2])
     with cA:
         universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top N"], index=0)
-        tf = st.selectbox("Timeframe", ["1D", "4H", "1W"], index=0)
-    with cB:
         provider_mode = st.selectbox(
             "Futures Quelle",
             ["Auto (Bitget→BingX→Bybit→MEXC→BloFin→OKX)"] + [f"Nur {p.upper()}" for p in PROVIDER_CHAIN],
             index=0
         )
+    with cB:
+        pattern_tf = st.selectbox("Pattern TF (NR Range)", ["1D", "4H", "1W"], index=0)
+        signal_tf = st.selectbox("Signal TF (Breakouts)", ["1m","5m","15m","30m","1h","4h","1d"], index=4)  # default 1h
+    with cC:
         allow_utc_fallback = st.checkbox("UTC-Fallback (CoinGecko)", value=False)
+        show_inrange_only = st.checkbox("Nur Coins im NR-Range (State=Inside)", value=False)
+        view_mode = st.radio("Ansicht", ["Kompakt (Mobile)", "Detail (Desktop)"], index=0, horizontal=True)
 
     with st.expander("ℹ️ Unterschied: Exchange Close vs UTC"):
         st.markdown("""
 **Exchange Close (Futures / Börsen-Close)**  
-- Wir nutzen Futures/SWAP-Kerzen direkt von der Börse.  
-- Tages-Close = Close der Börsen-Kerze (Tagesgrenze kann leicht abweichen).  
-- ✅ Vorteil: passt zum Futures-Feed.
+- Kerzen kommen direkt von der Futures-Börse (ccxt).  
+- Tagesgrenzen/Session können pro Börse leicht abweichen.  
+- ✅ Vorteil: passt exakt zu deinem Futures-Chart.
 
 **UTC (letzte abgeschlossene Tageskerze)**  
-- 00:00–23:59 UTC, letzte vollständig abgeschlossene Tageskerze.  
-- ✅ Vorteil: einheitlich  
-- ❌ Nachteil: langsamer & kann leicht abweichen.
+- Einheitliche Tageskerzen 00:00–23:59 UTC.  
+- ✅ Vorteil: überall gleich  
+- ❌ Nachteil: langsamer + kann von Börsenkerzen abweichen.
         """)
 
     p1, p2, p3 = st.columns(3)
@@ -613,14 +695,11 @@ def main():
     want_nr4 = p2.checkbox("NR4", value=False)
     want_nr10 = p3.checkbox("NR10", value=False)
 
-    show_inrange_only = st.checkbox("Nur Coins anzeigen, die aktuell im NR-Range sind", value=False)
-    view_mode = st.radio("Ansicht", ["Kompakt (Mobile)", "Detail (Desktop)"], index=0, horizontal=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     top_n = 150
     stable_toggle = False
     tickers_text = None
-    cw_map = load_cw_id_map()
 
     if universe == "CoinGecko Top N":
         st.markdown('<div class="nr-card">', unsafe_allow_html=True)
@@ -634,10 +713,6 @@ def main():
         tickers_text = st.text_area("Ticker (1 pro Zeile)", value=CW_DEFAULT_TICKERS, height=110)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    if ccxt is None:
-        st.error("ccxt ist nicht installiert. Bitte 'ccxt' in requirements.txt hinzufügen und neu deployen.")
-        return
-
     st.markdown('<div class="nr-card">', unsafe_allow_html=True)
     run = st.button("🚀 Scan starten", use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
@@ -648,16 +723,15 @@ def main():
         st.warning("Bitte mindestens NR7/NR4/NR10 auswählen.")
         return
 
-    tf_map = {"1D": "1d", "4H": "4h", "1W": "1w"}
-    ccxt_tf = tf_map[tf]
-
     if provider_mode.startswith("Nur "):
         selected = provider_mode.replace("Nur ", "").strip().lower()
         provider_chain = [selected]
     else:
         provider_chain = PROVIDER_CHAIN[:]
 
+    # -----------------------------
     # Build scan list
+    # -----------------------------
     scan_list = []
     if universe == "CoinGecko Top N":
         if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
@@ -677,6 +751,10 @@ def main():
         for sym in symbols:
             scan_list.append({"symbol": sym, "name": sym, "coingecko_id": cw_map.get(sym, "")})
 
+    # map tf selections to ccxt
+    ccxt_pattern_tf = TF_CCXT[pattern_tf.lower()]
+    ccxt_signal_tf = TF_CCXT[signal_tf.lower()]
+
     results, skipped, errors = [], [], []
     progress = st.progress(0)
 
@@ -686,13 +764,16 @@ def main():
             name = item.get("name", base)
             coin_id = item.get("coingecko_id", "")
 
-            closed = None
+            pattern_bars = None
+            signal_bars = None
             exchange_used = ""
             pair_used = ""
             data_source = ""
             last_reason = None
 
-            # Futures chain
+            # -----------------------------
+            # Futures chain (pattern + signal from same exchange/pair)
+            # -----------------------------
             for ex_id in provider_chain:
                 try:
                     if not hasattr(ccxt, ex_id):
@@ -705,12 +786,28 @@ def main():
                         last_reason = f"{ex_id}: symbol not listed"
                         continue
 
-                    rows = fetch_ohlcv_ccxt(ex_id, sym, timeframe=ccxt_tf, limit=200)
-                    if not rows:
-                        last_reason = f"{ex_id}: no data"
+                    # fetch pattern bars first
+                    pb = fetch_ohlcv_ccxt(ex_id, sym, timeframe=ccxt_pattern_tf, limit=250, since_ms=None)
+                    if not pb:
+                        last_reason = f"{ex_id}: no pattern data"
                         continue
 
-                    closed = rows
+                    setup = find_last_nr_setup(pb)
+                    if setup is None:
+                        # no NR found; still allow row? -> skip as "no pattern"
+                        last_reason = f"{ex_id}: no NR setup"
+                        continue
+
+                    # breakouts start AFTER pattern bar close
+                    start_after_close = setup["setup_ts"] + timeframe_to_ms(ccxt_pattern_tf)
+
+                    sb = fetch_ohlcv_ccxt(ex_id, sym, timeframe=ccxt_signal_tf, limit=350, since_ms=start_after_close)
+                    if not sb:
+                        last_reason = f"{ex_id}: no signal data"
+                        continue
+
+                    pattern_bars = pb
+                    signal_bars = sb
                     exchange_used = ex_id
                     pair_used = sym
                     data_source = "Futures"
@@ -728,8 +825,11 @@ def main():
                         last_reason = f"{ex_id}: error"
                     continue
 
-            # Optional UTC fallback (only meaningful on 1D)
-            if (closed is None) and allow_utc_fallback and tf == "1D":
+            # -----------------------------
+            # Optional UTC fallback (only meaningful when pattern_tf=1D and signal_tf=1D)
+            # (kept simple)
+            # -----------------------------
+            if (pattern_bars is None or signal_bars is None) and allow_utc_fallback and pattern_tf == "1D" and signal_tf == "1d":
                 try:
                     if not os.getenv("COINGECKO_DEMO_API_KEY", "").strip():
                         skipped.append(f"{base}: UTC fallback aktiv, aber CoinGecko Key fehlt")
@@ -738,7 +838,8 @@ def main():
                     else:
                         rows = cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30)
                         if rows and len(rows) >= 12:
-                            closed = rows
+                            pattern_bars = rows
+                            signal_bars = rows
                             exchange_used = "coingecko"
                             pair_used = coin_id
                             data_source = "UTC"
@@ -747,42 +848,52 @@ def main():
                 except Exception as e:
                     errors.append(f"{base}: UTC error - {type(e).__name__} - {str(e)[:160]}")
 
-            if closed is None:
+            if pattern_bars is None or signal_bars is None:
                 skipped.append(f"{base}: {last_reason or 'no data'}")
                 progress.progress(i / len(scan_list))
                 continue
 
             try:
-                nr4_flags, nr7_flags, nr10_flags = compute_nr_flags(closed)
-                last_nr10 = bool(nr10_flags[-1])
-                last_nr7 = bool(nr7_flags[-1])
-                last_nr4 = bool(nr4_flags[-1])
+                setup = find_last_nr_setup(pattern_bars)
+                if setup is None:
+                    skipped.append(f"{base}: no NR setup")
+                    progress.progress(i / len(scan_list))
+                    continue
+
+                # filter by selected NR types
+                last_nr10 = setup["nr10"]
+                last_nr7 = setup["nr7"]
+                last_nr4 = setup["nr4"]
 
                 nr10 = want_nr10 and last_nr10
                 nr7 = want_nr7 and last_nr7
                 nr4 = want_nr4 and last_nr4
 
-                setup_time, setup_type, breakout_state, breakout_tag, event_count, rh, rl, last_break_idx, prev_breakout_tag = simulate_breakouts_since_last_nr(closed)
-                last_close = float(closed[-1]["close"])
+                # compute breakouts on signal timeframe
+                rh = setup["rh"]
+                rl = setup["rl"]
+
+                binfo = simulate_breakouts_on_signal(signal_bars, rh=rh, rl=rl)
+
+                last_close = float(signal_bars[-1]["close"])
 
                 # State (Above/Below/Inside) + inRange
                 price_state = "—"
                 in_nr_range = False
-                if rh is not None and rl is not None:
-                    lo = min(rl, rh)
-                    hi = max(rl, rh)
-                    if last_close > hi:
-                        price_state = "Above"
-                    elif last_close < lo:
-                        price_state = "Below"
-                    else:
-                        price_state = "Inside"
-                        in_nr_range = True
+                lo = min(rl, rh)
+                hi = max(rl, rh)
+                if last_close > hi:
+                    price_state = "Above"
+                elif last_close < lo:
+                    price_state = "Below"
+                else:
+                    price_state = "Inside"
+                    in_nr_range = True
 
-                # Bars since last breakout
+                # Bars since last breakout on signal tf
                 bars_since = "-"
-                if isinstance(last_break_idx, int):
-                    bars_since = (len(closed) - 1) - last_break_idx
+                if isinstance(binfo["last_break_idx"], int):
+                    bars_since = (len(signal_bars) - 1) - binfo["last_break_idx"]
                     if bars_since < 0:
                         bars_since = "-"
 
@@ -790,7 +901,6 @@ def main():
                     progress.progress(i / len(scan_list))
                     continue
 
-                # show rows if pattern matches OR inrange_only is enabled and it's inside
                 show_row = (nr10 or nr7 or nr4) or (show_inrange_only and in_nr_range)
                 if show_row:
                     results.append({
@@ -799,14 +909,16 @@ def main():
                         "NR10": nr10,
                         "NR7": nr7,
                         "NR4": nr4,
+                        "pattern_tf": pattern_tf,
+                        "signal_tf": signal_tf,
                         "in_nr_range_now": in_nr_range,
                         "price_state": price_state,
                         "bars_since_breakout": bars_since,
-                        "breakout_state": breakout_state,
-                        "breakout_tag": breakout_tag,
-                        "breakout_events": event_count,
-                        "nr_setup_type": setup_type,
-                        "nr_setup_time": setup_time,
+                        "breakout_state": binfo["breakout_state"],
+                        "breakout_tag": binfo["breakout_tag"],
+                        "breakout_events": binfo["event_count"],
+                        "nr_setup_type": setup["setup_type"],
+                        "nr_setup_time": setup["setup_time"],
                         "exchange_used": exchange_used,
                         "pair_used": pair_used,
                         "data_source": data_source,
@@ -815,6 +927,7 @@ def main():
                         "range_high": rh,
                         "coingecko_id": coin_id,
                     })
+
             except Exception as e:
                 errors.append(f"{base}: calc error - {type(e).__name__} - {str(e)[:160]}")
 
@@ -848,6 +961,9 @@ def main():
 <div style="height:8px"></div>
 <div class="badge">⏭️ Skipped: <b>{len(skipped)}</b></div>
 <div class="badge">⚠️ Errors: <b>{len(errors)}</b></div>
+<div style="height:8px"></div>
+<div class="badge">🧩 Pattern TF: <b>{pattern_tf}</b></div>
+<div class="badge">🚦 Signal TF: <b>{signal_tf}</b></div>
 """, unsafe_allow_html=True)
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
@@ -860,17 +976,16 @@ def main():
             for _, r in df_disp.iterrows():
                 with st.expander(f"{r['symbol']} — {r['name']}"):
                     st.write(f"**Provider:** {r['exchange_used']}  |  **Pair:** {r['pair_used']}  |  **Quelle:** {r['data_source']}")
+                    st.write(f"**Pattern TF:** {r['pattern_tf']}  |  **Signal TF:** {r['signal_tf']}")
                     st.write(f"**Pattern:** {r['Pattern']}")
                     st.write(f"**State:** {r['State']}  |  **BarsSince:** {r['BarsSince']}")
                     st.write(f"**Breakout:** {r['Breakout']}  |  **Total events:** {r.get('breakout_events', 0)}")
                     st.write(f"**NR Setup:** {r['nr_setup_type']} @ {r['nr_setup_time']}")
-                    st.write(f"**Last Close:** {r['last_close']}")
-                    st.write(f"**Range Low/High:** {r['range_low']} / {r['range_high']}")
-                    if r.get("coingecko_id"):
-                        st.caption(f"coingecko_id: {r['coingecko_id']}")
+                    st.write(f"**Last Close (Signal TF):** {r['last_close']}")
+                    st.write(f"**Range Low/High (Pattern TF):** {r['range_low']} / {r['range_high']}")
     else:
-        detail = df_disp[["symbol", "name", "Pattern", "State", "Breakout", "BarsSince", "nr_setup_type", "nr_setup_time", "Ex", "data_source"]].copy()
-        detail.rename(columns={"symbol": "Coin", "name": "Name", "nr_setup_type": "Setup", "nr_setup_time": "Setup Time", "data_source": "Source"}, inplace=True)
+        detail = df_disp[["symbol", "name", "Pattern", "State", "Breakout", "BarsSince", "nr_setup_type", "nr_setup_time", "Ex", "pattern_tf", "signal_tf"]].copy()
+        detail.rename(columns={"symbol": "Coin", "name": "Name", "nr_setup_type": "Setup", "nr_setup_time": "Setup Time"}, inplace=True)
         st.dataframe(detail, use_container_width=True, hide_index=True)
 
         with st.expander("Technische Details (Pair/Range/Close)"):
@@ -881,7 +996,7 @@ def main():
     st.download_button(
         "CSV Export (voll)",
         df.to_csv(index=False).encode("utf-8"),
-        file_name=f"nr_scan_{tf}.csv",
+        file_name=f"nr_scan_pattern-{pattern_tf}_signal-{signal_tf}.csv",
         mime="text/csv",
         use_container_width=True
     )
@@ -891,13 +1006,13 @@ def main():
     if skipped or errors:
         with st.expander("Report (nicht gescannt / Fehler)"):
             if skipped:
-                st.write("**Skipped (kurz):**")
+                st.write("**Skipped:**")
                 for s in skipped[:300]:
                     st.write(s)
                 if len(skipped) > 300:
                     st.caption(f"... und {len(skipped)-300} weitere")
             if errors:
-                st.write("**Errors (kurz):**")
+                st.write("**Errors:**")
                 for e in errors[:200]:
                     st.write(e)
                 if len(errors) > 200:
