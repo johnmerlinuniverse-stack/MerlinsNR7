@@ -683,7 +683,7 @@ def short_ex(exchange_id: str) -> str:
 # App
 # -----------------------------
 def main():
-    st.set_page_config(page_title="NR Scanner (Futures)", layout="wide")
+    st.set_page_config(page_title="TEST Merlins NR Scanner ", layout="wide")
 
     if "theme_mode" not in st.session_state:
         st.session_state["theme_mode"] = "dark"
@@ -693,7 +693,7 @@ def main():
     header_left, header_right = st.columns([3, 1], vertical_alignment="center")
     with header_left:
         st.markdown(
-            '<div class="nr-card"><div class="nr-card-title">NR Scanner (Futures)</div>'
+            '<div class="nr-card"><div class="nr-card-title">TEST Merlins NR Scanner </div>'
             '<div class="nr-card-sub">NR-Pattern auf Pattern-TF · Breakouts auf Signal-TF · RangeActive wie LuxAlgo</div></div>',
             unsafe_allow_html=True
         )
